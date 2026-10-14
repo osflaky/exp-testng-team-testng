@@ -1,0 +1,185 @@
+package org.testng;
+
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Optional;
+import org.jspecify.annotations.Nullable;
+import org.testng.internal.thread.ThreadTimeoutException;
+
+/**
+ * This class describes the result of a test.
+ *
+ * @author Cedric Beust, May 2, 2004
+ * @version $Revision: 721 $, $Date: 2009-05-23 09:55:46 -0700 (Sat, 23 May 2009) $
+ * @since May 2, 2004
+ */
+public interface ITestResult extends IAttributes, Comparable<ITestResult> {
+
+  // Test status
+  int CREATED = -1;
+  int SUCCESS = 1;
+  int FAILURE = 2;
+  int SKIP = 3;
+  int SUCCESS_PERCENTAGE_FAILURE = 4;
+  int STARTED = 16;
+
+  default int getParameterIndex() {
+    return -1;
+  }
+
+  /** @return The status of this result, using one of the constants above. */
+  int getStatus();
+
+  void setStatus(int status);
+
+  /** @return The test method this result represents. */
+  ITestNGMethod getMethod();
+
+  /** @return The parameters this method was invoked with. */
+  Object[] getParameters();
+
+  void setParameters(Object[] parameters);
+
+  /** @return The test class used this object is a result for. */
+  IClass getTestClass();
+
+  /**
+   * @return The throwable that was thrown while running the method, or null if no exception was
+   *     thrown.
+   */
+  @Nullable
+  Throwable getThrowable();
+
+  void setThrowable(@Nullable Throwable throwable);
+
+  /** @return the start date for this test, in milliseconds. */
+  long getStartMillis();
+
+  /** @return the end date for this test, in milliseconds. */
+  long getEndMillis();
+
+  void setEndMillis(long millis);
+
+  /** @return The name of this TestResult, typically identical to the name of the method. */
+  String getName();
+
+  /** @return true if if this test run is a SUCCESS */
+  boolean isSuccess();
+
+  /**
+   * @return The host where this suite was run, or null if it was run locally. The returned string
+   *     has the form: host:port
+   */
+  @Nullable
+  String getHost();
+
+  /**
+   * @return The instance on which this method was run, or {@code null} when the method carries no
+   *     instance.
+   */
+  @Nullable
+  Object getInstance();
+
+  /**
+   * @return - A parameter array that was passed to a factory method (or) an empty object array
+   *     otherwise.
+   */
+  Object[] getFactoryParameters();
+
+  /**
+   * Returns the <code>&#64;Factory</code> produced instance this result belongs to.
+   *
+   * @return - The instance, or an empty {@link Optional} when no factory produced the test class.
+   *     Gives access to the instance's index within the factory output, the parameters of the
+   *     factory invocation that produced it, and the factory itself. Reading it never instantiates
+   *     a lazily created instance.
+   * @since 7.13.0
+   */
+  default Optional<IFactoryInstance> getFactoryInstance() {
+    return getMethod().getFactoryInstance();
+  }
+
+  /**
+   * @return The test name if this result's related instance implements ITest or
+   *     use @Test(testName=...), null otherwise.
+   */
+  @Nullable
+  String getTestName();
+
+  /** @return The name of the instance this method was run on. */
+  String getInstanceName();
+
+  /**
+   * @return the {@link ITestContext} for this test result, or {@code null} when the result was
+   *     built outside a test context, as the parameter carrier a configuration method is handed is:
+   *     it is built before the invocation it reports on is bound to one.
+   */
+  @Nullable
+  ITestContext getTestContext();
+
+  /** @param name - The new name to be used as a test name */
+  void setTestName(String name);
+
+  /**
+   * @return - <code>true</code> if the test was retried again by an implementation of {@link
+   *     IRetryAnalyzer}
+   */
+  boolean wasRetried();
+
+  /**
+   * @param wasRetried - <code>true</code> if the test was retried and <code>false</code> otherwise.
+   */
+  void setWasRetried(boolean wasRetried);
+
+  /**
+   * @return - The list of either upstream method(s) or configuration method(s) whose failure led to
+   *     the current method being skipped. An empty list is returned when the current method is not
+   *     a skipped method.
+   */
+  default List<ITestNGMethod> getSkipCausedBy() {
+    return Collections.emptyList();
+  }
+
+  /**
+   * @return - A unique id for the current JVM that represents a unique way of identifying a
+   *     specific test method's result.
+   */
+  String id();
+
+  /**
+   * @return - <code>true</code> if the current test result is either {@link ITestResult#STARTED} or
+   *     {@link ITestResult#CREATED}
+   */
+  default boolean isNotRunning() {
+    return getStatus() == STARTED || getStatus() == CREATED;
+  }
+
+  /**
+   * @return - A list of all user facing statuses viz.,
+   *     <ul>
+   *       <li>{@link ITestResult#SUCCESS}
+   *       <li>{@link ITestResult#SUCCESS_PERCENTAGE_FAILURE}
+   *       <li>{@link ITestResult#FAILURE}
+   *       <li>{@link ITestResult#SKIP}
+   *     </ul>
+   */
+  static List<String> finalStatuses() {
+    return Arrays.asList("SUCCESS", "FAILURE", "SKIP", "SUCCESS_PERCENTAGE_FAILURE");
+  }
+
+  /**
+   * @param result - The test result of a method
+   * @return - <code>true</code> if the test failure was due to a timeout.
+   */
+  static boolean wasFailureDueToTimeout(ITestResult result) {
+    Throwable cause = result.getThrowable();
+    while (cause != null && !cause.getClass().equals(Throwable.class)) {
+      if (cause instanceof ThreadTimeoutException) {
+        return true;
+      }
+      cause = cause.getCause();
+    }
+    return false;
+  }
+}

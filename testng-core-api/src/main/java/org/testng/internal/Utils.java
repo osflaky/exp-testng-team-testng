@@ -1,0 +1,765 @@
+package org.testng.internal;
+
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
+import java.io.StringReader;
+import java.io.StringWriter;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.stream.Collectors;
+import org.jspecify.annotations.Nullable;
+import org.testng.ITestClass;
+import org.testng.ITestContext;
+import org.testng.ITestNGMethod;
+import org.testng.ITestResult;
+import org.testng.TestNGException;
+import org.testng.log4testng.Logger;
+import org.testng.reporters.XMLStringBuffer;
+
+/** Helper methods to parse annotations. */
+public final class Utils {
+
+  private static final String LINE_SEP = RuntimeBehavior.getDefaultLineSeparator();
+
+  private static final char[] SPECIAL_CHARACTERS = {
+    '*', '/', '\\', '?', '%', ':', ';', '<', '>', '&', '~', '|'
+  };
+  public static final char CHAR_REPLACEMENT = '_';
+  public static final char UNICODE_REPLACEMENT = 0xFFFD;
+  private static final String FORMAT = String.format("[%s]", Utils.class.getSimpleName());
+
+  private static final Logger LOG = Logger.getLogger(Utils.class);
+
+  private static final Map<Character, String> ESCAPES = new HashMap<>();
+
+  static {
+    ESCAPES.put('<', "&lt;");
+    ESCAPES.put('>', "&gt;");
+    ESCAPES.put('\'', "&apos;");
+    ESCAPES.put('"', "&quot;");
+    ESCAPES.put('&', "&amp;");
+  }
+
+  // Moved from TestRunner
+  // TODO: replace with Logger?
+  private static int m_verbose = 1;
+
+  /** Hide constructor for utility class. */
+  private Utils() {
+    // Hide constructor
+  }
+
+  public static int getVerbose() {
+    return m_verbose;
+  }
+
+  public static void setVerbose(int n) {
+    m_verbose = n;
+  }
+
+  public static void writeUtf8File(
+      @Nullable String outputDir, String fileName, XMLStringBuffer xsb, @Nullable String prefix) {
+    final File outDir = outputDir != null ? new File(outputDir) : new File("").getAbsoluteFile();
+    if (!outDir.exists()) {
+      boolean ignored = outDir.mkdirs();
+    }
+    final File file = new File(outDir, fileName);
+    try {
+      if (!file.exists()) {
+        boolean ignored = file.createNewFile();
+      }
+      try (final OutputStreamWriter w =
+          new OutputStreamWriter(new FileOutputStream(file), StandardCharsets.UTF_8)) {
+        if (prefix != null) {
+          w.append(prefix);
+        }
+        xsb.toWriter(w);
+      } catch (Throwable writingOut) {
+        // What reached the file is the prefix and whatever the buffer managed before it gave up,
+        // which for index.html is a page header and no body. Removing it leaves no report rather
+        // than one that opens and says nothing about why it is empty.
+        //
+        // Throwable rather than RuntimeException, because Error is its sibling and not its
+        // subtype: GITHUB-1259 and GITHUB-2334 both end in an OutOfMemoryError inside the
+        // reporter, which is the case this branch exists for and the one where the stub matters
+        // most -- nothing downstream is going to write a better file over it. It also covers the
+        // IOException the final flush raises when the disk fills, which the catch below reports.
+        boolean ignored = file.delete();
+        throw writingOut;
+      }
+    } catch (IOException ex) {
+      // Names the file: it was just removed, so this is the only record a report was expected
+      // there.
+      LOG.error("Could not write " + file, ex);
+    }
+  }
+
+  /**
+   * Writes the content of the sb string to the file named filename in outDir encoding the output as
+   * UTF-8. If outDir does not exist, it is created.
+   *
+   * @param outputDir the output directory (may not exist). If <code>null</code> then current
+   *     directory is used.
+   * @param fileName the filename
+   * @param sb the file content
+   */
+  public static void writeUtf8File(@Nullable String outputDir, String fileName, String sb) {
+    final String outDirPath = outputDir != null ? outputDir : "";
+    final File outDir = new File(outDirPath);
+    writeFile(outDir, fileName, escapeUnicode(sb), "UTF-8");
+  }
+
+  /**
+   * Writes the content of the sb string to the file named filename in outDir. If outDir does not
+   * exist, it is created.
+   *
+   * @param outputDir the output directory (may not exist). If <code>null</code> then current
+   *     directory is used.
+   * @param fileName the filename
+   * @param sb the file content
+   */
+  public static void writeFile(@Nullable String outputDir, String fileName, String sb) {
+    final String outDirPath = outputDir != null ? outputDir : "";
+    final File outDir = new File(outDirPath);
+    writeFile(outDir, fileName, sb, null);
+  }
+
+  /**
+   * Writes the content of the sb string to the file named filename in outDir. If outDir does not
+   * exist, it is created.
+   *
+   * @param outputFolder the output directory (may not exist). If <tt>null</tt> then current
+   *     directory is used.
+   * @param fileNameParameter the filename
+   * @param sb the file content
+   */
+  private static void writeFile(
+      @Nullable File outputFolder, String fileNameParameter, String sb, @Nullable String encoding) {
+    File outDir = outputFolder;
+    String fileName = fileNameParameter;
+    try {
+      if (outDir == null) {
+        outDir = new File("").getAbsoluteFile();
+      }
+      if (!outDir.exists()) {
+        boolean ignored = outDir.mkdirs();
+      }
+
+      fileName = replaceSpecialCharacters(fileName);
+      File outputFile = new File(outDir, fileName);
+      boolean ignored = outputFile.delete();
+      log(FORMAT, 3, "Attempting to create " + outputFile);
+      log(FORMAT, 3, "  Directory " + outDir + " exists: " + outDir.exists());
+      outputFile.createNewFile();
+      writeFile(outputFile, sb, encoding);
+    } catch (IOException e) {
+      if (getVerbose() > 1) {
+        LOG.error(e.getMessage(), e);
+      } else {
+        log(FORMAT, 1, e.getMessage());
+      }
+    }
+  }
+
+  private static void writeFile(File outputFile, String sb, @Nullable String encoding) {
+    try (BufferedWriter fw = openWriter(outputFile, encoding)) {
+      fw.write(sb);
+
+      Utils.log("", 3, "Creating " + outputFile.getAbsolutePath());
+    } catch (IOException ex) {
+      if (getVerbose() > 1) {
+        LOG.error("ERROR WHILE WRITING TO " + outputFile, ex);
+      } else {
+        log(FORMAT, 1, "Error while writing to " + outputFile + ": " + ex.getMessage());
+      }
+    }
+    // ignore
+  }
+
+  /**
+   * Open a BufferedWriter for the specified file. If output directory doesn't exist, it is created.
+   * If the output file exists, it is deleted. The output file is created in any case.
+   *
+   * @param outputDir output directory. If <code>null</code>, then current directory is used
+   * @param fileNameParameter file name
+   * @throws IOException if anything goes wrong while creating files.
+   */
+  public static BufferedWriter openWriter(@Nullable String outputDir, String fileNameParameter)
+      throws IOException {
+    String fileName = fileNameParameter;
+    String outDirPath = outputDir != null ? outputDir : "";
+    File outDir = new File(outDirPath);
+    if (!outDir.exists()) {
+      boolean ignored = outDir.mkdirs();
+    }
+    fileName = replaceSpecialCharacters(fileName);
+    File outputFile = new File(outDir, fileName);
+    boolean ignored = outputFile.delete();
+    return openWriter(outputFile, null);
+  }
+
+  private static BufferedWriter openWriter(File outputFile, @Nullable String encoding)
+      throws IOException {
+    if (!outputFile.exists()) {
+      boolean ignored = outputFile.createNewFile();
+    }
+    OutputStreamWriter osw;
+    if (null != encoding) {
+      osw = new OutputStreamWriter(new FileOutputStream(outputFile), Charset.forName(encoding));
+    } else {
+      osw = new OutputStreamWriter(new FileOutputStream(outputFile));
+    }
+    return new BufferedWriter(osw);
+  }
+
+  public static void log(String msg) {
+    log("Utils", 2, msg);
+  }
+
+  /**
+   * Logs the the message to System.out if level is greater than or equal to getVerbose(). The
+   * message is logged as:
+   *
+   * <pre>
+   *     "[cls] msg"
+   * </pre>
+   *
+   * @param cls the class name to prefix the log message.
+   * @param level the logging level of the message.
+   * @param msg the message to log to System.out.
+   */
+  public static void log(String cls, int level, @Nullable String msg) {
+    // Why this coupling on a static member of getVerbose()?
+    if (getVerbose() >= level) {
+      if (!cls.isEmpty()) {
+        LOG.info("[" + cls + "] " + msg);
+      } else {
+        LOG.info(msg);
+      }
+    }
+  }
+
+  public static void error(String errorMessage) {
+    LOG.error("[Error] " + errorMessage);
+  }
+
+  public static void warn(String warnMsg) {
+    LOG.warn(warnMsg);
+  }
+
+  /**
+   * Splits on a literal separator, with the same result {@code String.split(separator)} gives for a
+   * separator that happens to contain no regular expression syntax: trailing empty pieces are
+   * dropped, a value the separator never occurs in answers itself, and nothing is trimmed.
+   *
+   * <p>The point is that the separator is never read as a pattern. {@code "]]>"} and {@code "|"}
+   * mean the same thing here, which is not true of {@code String.split}.
+   *
+   * @param value the string to split, never null
+   * @param separator the literal separator, never empty
+   * @return the pieces, in order
+   */
+  public static String[] splitOnLiteral(String value, String separator) {
+    if (separator.isEmpty()) {
+      throw new IllegalArgumentException("a separator has to be something");
+    }
+    if (value.isEmpty()) {
+      // The one input the loop below would answer differently: String.split answers [""].
+      return new String[] {value};
+    }
+    List<String> pieces = new ArrayList<>();
+    int start = 0;
+    for (int at = value.indexOf(separator); at != -1; at = value.indexOf(separator, start)) {
+      pieces.add(value.substring(start, at));
+      start = at + separator.length();
+    }
+    pieces.add(value.substring(start));
+    // Drop the trailing empties, which is what a split with no limit does.
+    int end = pieces.size();
+    while (end > 0 && pieces.get(end - 1).isEmpty()) {
+      end--;
+    }
+    return pieces.subList(0, end).toArray(new String[0]);
+  }
+
+  /**
+   * Splits a comma separated command line value. Every piece is trimmed and the empty ones are
+   * dropped, so {@code "a.B, a.C,"} answers {@code [a.B, a.C]} and {@code ""} answers nothing.
+   *
+   * @param value the raw option value, never null
+   * @return the pieces the user meant, in order
+   */
+  public static List<String> splitCommaSeparated(String value) {
+    return Arrays.stream(split(value, ","))
+        .filter(piece -> !piece.isEmpty())
+        .collect(Collectors.toCollection(ArrayList::new));
+  }
+
+  /* Tokenize the string using the separator, trimming every piece. Unlike splitOnLiteral and
+   * String.split it keeps every trailing empty piece, and it answers an empty array for a null or
+   * empty input where String.split answers [""]. */
+  public static String[] split(@Nullable String string, String sep) {
+    if (string == null || string.isEmpty()) {
+      return new String[0];
+    }
+
+    int start = 0;
+    int idx = string.indexOf(sep, start);
+    int len = sep.length();
+    List<String> strings = new ArrayList<>();
+
+    while (idx != -1) {
+      strings.add(string.substring(start, idx).trim());
+      start = idx + len;
+      idx = string.indexOf(sep, start);
+    }
+
+    strings.add(string.substring(start).trim());
+
+    return strings.toArray(new String[0]);
+  }
+
+  public static void writeResourceToFile(File file, String resourceName, Class<?> clasz)
+      throws IOException {
+    InputStream inputStream = clasz.getResourceAsStream("/" + resourceName);
+    if (inputStream == null) {
+      LOG.error("Couldn't find resource on the class path: " + resourceName);
+      return;
+    }
+    try (inputStream) {
+      try (FileOutputStream outputStream = new FileOutputStream(file)) {
+        int nread;
+        byte[] buffer = new byte[4096];
+        while (0 < (nread = inputStream.read(buffer))) {
+          outputStream.write(buffer, 0, nread);
+        }
+      }
+    }
+  }
+
+  public static String defaultIfStringEmpty(@Nullable String s, String defaultValue) {
+    // Inlined rather than delegated to isStringEmpty: a nullness check hidden behind a call does
+    // not refine s on the other branch.
+    return s == null || s.isEmpty() ? defaultValue : s;
+  }
+
+  public static boolean isStringBlank(@Nullable String s) {
+    return s == null || s.trim().isEmpty();
+  }
+
+  public static boolean isStringEmpty(@Nullable String s) {
+    return s == null || s.isEmpty();
+  }
+
+  public static boolean isStringNotBlank(@Nullable String s) {
+    return !isStringBlank(s);
+  }
+
+  public static boolean isStringNotEmpty(@Nullable String s) {
+    return !isStringEmpty(s);
+  }
+
+  /**
+   * Helper that returns a short stack trace.
+   *
+   * @param t - The {@link Throwable} exception
+   * @param toHtml - <code>true</code> if the stacktrace should be translated to html as well
+   * @return - A string that represents the full stack trace.
+   */
+  public static String longStackTrace(Throwable t, boolean toHtml) {
+    return buildStackTrace(t, toHtml, StackTraceType.FULL);
+  }
+
+  /**
+   * Helper that returns a long stack trace.
+   *
+   * @param t - The {@link Throwable} exception
+   * @param toHtml - <code>true</code> if the stacktrace should be translated to html as well
+   * @return - A string that represents the short stack trace.
+   */
+  public static String shortStackTrace(Throwable t, boolean toHtml) {
+    return buildStackTrace(t, toHtml, StackTraceType.SHORT);
+  }
+
+  private static String buildStackTrace(Throwable t, boolean toHtml, StackTraceType type) {
+    StringWriter sw = new StringWriter();
+    PrintWriter pw = new PrintWriter(sw);
+    try {
+      t.printStackTrace(pw);
+    } catch (Throwable e) {
+      // failsafe in case if printStackTrace throws exception
+      pw.println(t.getClass().getName());
+      e.printStackTrace(pw);
+    }
+    pw.flush();
+    String stackTrace = sw.getBuffer().toString();
+    if (type == StackTraceType.SHORT && !isTooVerbose()) {
+      stackTrace = filterTrace(sw.getBuffer().toString());
+    }
+    if (toHtml) {
+      stackTrace = escapeHtml(stackTrace);
+    }
+    return stackTrace;
+  }
+
+  private static boolean isTooVerbose() {
+    return RuntimeBehavior.showTestNGStackFrames() || getVerbose() >= 2;
+  }
+
+  private enum StackTraceType {
+    SHORT,
+    FULL
+  }
+
+  /** Escapes the five characters that must not appear literally in HTML or XML text. */
+  public static String escapeHtml(String s) {
+    StringBuilder result = new StringBuilder();
+
+    for (int i = 0; i < s.length(); i++) {
+      char c = s.charAt(i);
+      String nc = ESCAPES.get(c);
+      if (nc != null) {
+        result.append(nc);
+      } else {
+        result.append(c);
+      }
+    }
+
+    return result.toString();
+  }
+
+  /** Replaces every character the JVM does not define with the Unicode replacement character. */
+  public static String escapeUnicode(String s) {
+    StringBuilder result = new StringBuilder();
+
+    for (int i = 0; i < s.length(); i++) {
+      char c = s.charAt(i);
+      char ca = Character.isDefined(c) ? c : UNICODE_REPLACEMENT;
+      result.append(ca);
+    }
+
+    return result.toString();
+  }
+
+  static String filterTrace(String trace) {
+    StringReader stringReader = new StringReader(trace);
+    BufferedReader bufferedReader = new BufferedReader(stringReader);
+    StringBuilder buf = new StringBuilder();
+
+    try {
+      // first line contains the thrown exception
+      String line = bufferedReader.readLine();
+      if (line == null) {
+        return "";
+      }
+      buf.append(line).append(LINE_SEP);
+
+      //
+      // the stack frames of the trace
+      //
+      String[] excludedStrings =
+          new String[] {"org.testng", "reflect", "org.gradle", "org.apache.maven.surefire"};
+
+      int excludedCount = 0;
+      while ((line = bufferedReader.readLine()) != null) {
+        boolean isExcluded = false;
+        for (String excluded : excludedStrings) {
+          if (line.contains(excluded)) {
+            isExcluded = true;
+            excludedCount++;
+            break;
+          }
+        }
+        if (!isExcluded) {
+          buf.append(line).append(LINE_SEP);
+        }
+      }
+      if (excludedCount > 0) {
+        buf.append("... Removed ").append(excludedCount).append(" stack frames");
+      }
+    } catch (IOException ioex) {
+      // do nothing
+    }
+
+    return buf.toString();
+  }
+
+  public static String toString(Object object, Class<?> objectClass) {
+    if (null == object) {
+      return "null";
+    }
+    final String toString = toString(object);
+    if (isStringEmpty(toString)) {
+      return "\"\"";
+    } else if (String.class.equals(objectClass)) {
+      return "\"" + toString + '\"';
+    } else {
+      return toString;
+    }
+  }
+
+  /**
+   * The test class a method was bound to.
+   *
+   * <p>{@link ITestNGMethod#getTestClass()} answers {@code null} until the finder binds the method
+   * to its class, which happens before the method is scheduled; every method a runner, a reporter
+   * or a listener sees is bound. Use this rather than dereferencing the accessor, so that an
+   * unbound method is named at the boundary.
+   *
+   * @param method The method to read the test class of.
+   * @return The test class, never {@code null}.
+   */
+  public static ITestClass requireTestClassOf(ITestNGMethod method) {
+    return Objects.requireNonNull(method.getTestClass(), "a scheduled method is bound to a class");
+  }
+
+  /**
+   * The test context a result was produced in.
+   *
+   * <p>{@link ITestResult#getTestContext()} answers {@code null} for a result built outside a run,
+   * and on the parameter carrier a configuration method is handed, which is built before the
+   * invocation is reported. Every result a reporter sees has one. Use this rather than
+   * dereferencing the accessor, so that a context-less result is named at the boundary.
+   *
+   * @param result The result to read the context of.
+   * @return The test context, never {@code null}.
+   */
+  public static ITestContext requireTestContextOf(ITestResult result) {
+    return Objects.requireNonNull(result.getTestContext(), "a reported result carries a context");
+  }
+
+  /**
+   * @param context a test context that has finished
+   * @return when it finished
+   * @throws NullPointerException if it has not finished
+   */
+  public static Instant requireEndInstantOf(ITestContext context) {
+    return Objects.requireNonNull(context.getEndInstant(), "a reported test context has finished");
+  }
+
+  /**
+   * How long a &lt;test&gt; ran, in milliseconds.
+   *
+   * <p>Asserts through {@link #requireEndInstantOf(ITestContext)} that the context has finished,
+   * which is what every reporter asking for a duration already did.
+   *
+   * @param context The context to measure.
+   * @return The elapsed milliseconds between the start and the end of the context.
+   */
+  public static long durationOf(ITestContext context) {
+    return Duration.between(context.getStartInstant(), requireEndInstantOf(context)).toMillis();
+  }
+
+  public static String detailedMethodName(ITestNGMethod method, boolean fqn) {
+    String tempName = annotationFormFor(method);
+    if (!tempName.isEmpty()) {
+      tempName += " ";
+    }
+    return tempName + (fqn ? method.toString() : method.getMethodName());
+  }
+
+  public static String detailedMethodName(ITestNGMethod method) {
+    String tempName = annotationFormFor(method);
+    if (!tempName.isEmpty()) {
+      tempName += " ";
+    }
+    return tempName + method.getQualifiedName();
+  }
+
+  /**
+   * Given a TestNG method, returns the corresponding annotation based on the method type
+   *
+   * @param method - An {@link ITestNGMethod} object.
+   * @return - A String representation of the corresponding annotation.
+   */
+  public static String annotationFormFor(ITestNGMethod method) {
+    if (method.isBeforeSuiteConfiguration()) {
+      return "@BeforeSuite";
+    }
+    if (method.isBeforeTestConfiguration()) {
+      return "@BeforeTest";
+    }
+    if (method.isBeforeClassConfiguration()) {
+      return "@BeforeClass";
+    }
+    if (method.isBeforeGroupsConfiguration()) {
+      return "@BeforeGroups";
+    }
+    if (method.isBeforeMethodConfiguration()) {
+      return "@BeforeMethod";
+    }
+    if (method.isAfterMethodConfiguration()) {
+      return "@AfterMethod";
+    }
+    if (method.isAfterGroupsConfiguration()) {
+      return "@AfterGroups";
+    }
+    if (method.isAfterClassConfiguration()) {
+      return "@AfterClass";
+    }
+    if (method.isAfterTestConfiguration()) {
+      return "@AfterTest";
+    }
+    if (method.isAfterSuiteConfiguration()) {
+      return "@AfterSuite";
+    }
+    return "";
+  }
+
+  public static String arrayToString(String[] strings) {
+    return String.join(", ", strings);
+  }
+
+  /**
+   * If the file name contains special characters like *,/,\ and so on, exception will be thrown and
+   * report file will not be created.<br>
+   * Special characters are platform specific and they are not same for example on Windows and
+   * Macintosh. * is not allowed on Windows, but it is on Macintosh.<br>
+   * In order to have the same behavior of testng on the all platforms, characters like * will be
+   * replaced on all platforms whether they are causing the problem or not.
+   *
+   * @param fileNameParameter file name that could contain special characters.
+   * @return fileName with special characters replaced
+   */
+  public static String replaceSpecialCharacters(String fileNameParameter) {
+    String fileName = fileNameParameter;
+    if (fileName == null || fileName.isEmpty()) {
+      return fileName;
+    }
+    for (char element : SPECIAL_CHARACTERS) {
+      fileName = fileName.replace(element, CHAR_REPLACEMENT);
+    }
+
+    return fileName;
+  }
+
+  public static <T> String join(List<T> objects, String separator) {
+    return objects.stream().map(Object::toString).collect(Collectors.joining(separator));
+  }
+
+  /* Make sure that either we have an instance or if not, that the method is static */
+  public static void checkInstanceOrStatic(@Nullable Object instance, @Nullable Method method) {
+    if (instance == null && method != null && !Modifier.isStatic(method.getModifiers())) {
+      throw new TestNGException(
+          "Can't invoke "
+              + method
+              + ": either make it static or add "
+              + "a no-args constructor to your class");
+    }
+  }
+
+  public static void checkReturnType(@Nullable Method method, Class<?>... returnTypes) {
+    if (method == null) {
+      return;
+    }
+    for (Class<?> returnType : returnTypes) {
+      if (method.getReturnType() == returnType) {
+        return;
+      }
+    }
+    throw new TestNGException(
+        method.getDeclaringClass().getName()
+            + "."
+            + method.getName()
+            + " MUST return "
+            + toString(returnTypes)
+            + " but returns "
+            + method.getReturnType().getName());
+  }
+
+  private static String toString(Class<?>[] classes) {
+    StringBuilder sb = new StringBuilder("[ ");
+    for (int i = 0; i < classes.length; i++) {
+      Class<?> clazz = classes[i];
+      if (clazz.isArray()) {
+        sb.append(clazz.getComponentType().getName()).append("[]");
+      } else {
+        sb.append(clazz.getName());
+      }
+      if ((i + 1) < classes.length) { // increment and compare
+        sb.append(" or ");
+      }
+    }
+    sb.append(" ]");
+    return sb.toString();
+  }
+
+  /**
+   * Returns the string representation of the specified object, transparently handling null
+   * references and arrays.
+   *
+   * <p>Failsafe, like {@link #buildStackTrace}: this runs the object's {@code toString()}, and
+   * every caller of it is a report or a console line -- none of them a place to fail from. One that
+   * throws is described the way {@link Object#toString()} would have described it without one,
+   * rather than ending the report that asked. GITHUB-2830 is what that costs when it is not
+   * guarded.
+   *
+   * @param obj the object
+   * @return the string representation
+   */
+  public static String toString(Object obj) {
+    if (obj == null) {
+      return "null";
+    }
+    try {
+      return render(obj);
+    } catch (Throwable rendering) {
+      return identityToString(obj);
+    }
+  }
+
+  /** The rendering itself, which is the half that runs the user's code. */
+  private static String render(Object obj) {
+    if (obj instanceof boolean[]) {
+      return Arrays.toString((boolean[]) obj);
+    } else if (obj instanceof byte[]) {
+      return Arrays.toString((byte[]) obj);
+    } else if (obj instanceof char[]) {
+      return Arrays.toString((char[]) obj);
+    } else if (obj instanceof double[]) {
+      return Arrays.toString((double[]) obj);
+    } else if (obj instanceof float[]) {
+      return Arrays.toString((float[]) obj);
+    } else if (obj instanceof int[]) {
+      return Arrays.toString((int[]) obj);
+    } else if (obj instanceof long[]) {
+      return Arrays.toString((long[]) obj);
+    } else if (obj instanceof Object[]) {
+      return Arrays.deepToString((Object[]) obj);
+    } else if (obj instanceof short[]) {
+      return Arrays.toString((short[]) obj);
+    } else {
+      return obj.toString();
+    }
+  }
+
+  /**
+   * What {@link Object#toString()} answers for a class that does not override it, spelled out here
+   * because the one that does cannot be asked. {@code TestHTMLReporter} has answered the same shape
+   * for GITHUB-2830 since long before this was guarded, in decimal rather than in hex -- a
+   * consequence of concatenating the identity hash rather than a decision.
+   */
+  private static String identityToString(Object obj) {
+    return obj.getClass().getName() + "@" + Integer.toHexString(System.identityHashCode(obj));
+  }
+
+  public static String stringifyTypes(Class<?>[] parameterTypes) {
+    return Arrays.stream(parameterTypes).map(Class::getName).collect(Collectors.joining(","));
+  }
+}

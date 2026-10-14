@@ -1,0 +1,1064 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE suite SYSTEM "https://testng.org/testng-1.0.dtd">
+<suite name="TestNG" parallel="false" thread-count="2"
+    data-provider-thread-count="3">
+
+  <suite-files>
+    <suite-file path="./parent-module-suite.xml" />
+    <suite-file path="./188.xml"/>
+  </suite-files>
+
+  <listeners>
+    <listener class-name="org.testng.internal.ConsoleReporter"/>
+  </listeners>
+
+  <test name="Nopackage">
+    <groups>
+      <run>
+        <include name="nopackage"/>
+      </run>
+    </groups>
+    <classes>
+      <class name="NoPackageTest" />
+    </classes>
+  </test>
+
+  <test name="1336_Tests_With_Priority" parallel="classes" thread-count="10">
+    <classes>
+      <class name="org.testng.priority.github1336.TestNG1"/>
+      <class name="org.testng.priority.github1336.TestNG2"/>
+      <class name="org.testng.priority.github1336.TestNG3"/>
+    </classes>
+  </test>
+
+  <test name="1336_Tests_No_Priority" parallel="classes" thread-count="10">
+    <classes>
+      <class name="org.testng.priority.github1336.TestNG1NoPriority"/>
+      <class name="org.testng.priority.github1336.TestNG2NoPriority"/>
+      <class name="org.testng.priority.github1336.TestNG3NoPriority"/>
+    </classes>
+  </test>
+
+
+  <parameter name="first-name" value="Cedric" />
+
+  <test name="Regression1" >
+    <groups>
+      <define name="evenodd">
+        <include name="even" />
+        <include name="odd" />
+      </define>
+      <run>
+        <exclude name="excludeThisGroup" />
+      </run>
+    </groups>
+
+    <classes>
+      <class name="org.testng.parameters.ParameterSample" />
+      <class name="org.testng.parameters.ParameterTest" />
+      <class name="test.Test1" />
+      <class name="test.Test2" />
+      <class name="test.CtorCalledOnce" />
+      <class name="test.expectedexceptions.ExpectedExceptionsTest" />
+      <class name="test.expectedexceptions.issue2074.IssueTest"/>
+      <class name="test.expectedexceptions.issue2235.IssueTest"/>
+      <class name="test.access.PrivateAccessConfigurationMethods" />
+      <class name="test.expectedexceptions.WrappedExpectedExceptionTest" />
+      <class name="org.testng.parameters.OptionalParameterTest"/>
+      <class name="org.testng.parameters.ParamInheritanceTest"/>
+    </classes>
+  </test>
+
+  <test name="Regression2">
+    <groups>
+      <run>
+        <exclude name="broken" />
+      </run>
+    </groups>
+    <classes>
+      <class name="test.graph.GraphVisualiserTest"/>
+      <class name="test.xml.duplicate.DuplicateXmlOccurrenceTest"/>
+      <class name="test.Test1" />
+      <class name="test.MethodTest" />
+      <class name="test.sample.AfterClassCalledAtEnd"/>
+      <class name="test.GraphTest"/>
+      <class name="org.testng.internal.DynamicGraphTest"/>
+      <class name="org.testng.internal.MethodSortingTest"/>
+      <class name="org.testng.internal.MethodInstanceTest"/>
+      <class name="org.testng.internal.TestResultMethodBindingTest"/>
+      <class name="org.testng.reporters.TestHTMLReporterTest"/>
+      <class name="org.testng.internal.invokers.ParameterHandlerTest"/>
+      <class name="org.testng.internal.TestListenerHelperTest"/>
+      <class name="org.testng.internal.classfinder.ClassFinderNoClassDefFoundErrorTest"/>
+      <class name="org.testng.internal.GroupsHelperTest"/>
+      <class name="org.testng.internal.DynamicGraphHelperTest"/>
+      <class name="org.testng.internal.thread.graph.TestNGFutureTaskTest"/>
+      <class name="org.testng.internal.thread.graph.GraphOrchestratorTest"/>
+      <class name="org.testng.internal.KeyAwareAutoCloseableLockTest"/>
+      <class name="org.testng.internal.BaseTestMethodTest"/>
+      <class name="org.testng.reflect.ReflectionHelperTest"/>
+      <class name="test.privatemethod.PrivateMethodTest$PrivateMethodInnerTest"/>
+      <class name="test.multiple.TestMultiple"/>
+      <class name="test.ClassConfigurations"/>
+      <class name="test.alwaysrun.AlwaysRunTest"/>
+      <class name="org.testng.conffailure.ConfigurationFailure" />
+      <class name="org.testng.conffailure.SkippedSetupTest" />
+      <class name="org.testng.conffailure.RetriedInvocationTest" />
+      <class name="org.testng.conffailure.issue1622.IssueTest" />
+      <class name="org.testng.conffailure.issue3522.Issue3522Test" />
+      <class name="test.superclass.MainTest" />
+      <class name="test.superclass.Test3" />
+      <class name="test.failures.FailuresTest" />
+      <class name="test.mannotation.MAnnotationSampleTest" />
+      <class name="test.mannotation.MAnnotation2SampleTest" />
+      <class name="test.mannotation.issue1976.IssueTest" />
+      <class name="org.testng.concurrency.FactoryTest" />
+      <class name="org.testng.concurrency.CustomExecutorServiceFactoryTest"/>
+      <class name="org.testng.concurrency.SharedThreadPoolTest"/>
+      <class name="org.testng.concurrency.issue2361.IssueTest"/>
+      <class name="org.testng.concurrency.SequentialTest" />
+      <class name="org.testng.concurrency.SingleThreadForParallelMethodsTest"/>
+      <class name="org.testng.concurrency.ThreadCountSuiteTest"/>
+      <class name="org.testng.concurrency.ParallelTestTest" />
+      <class name="org.testng.concurrency.DataProviderThreadPoolSizeTest" />
+      <class name="org.testng.concurrency.MultiThreadedDependentTest" />
+      <class name="org.testng.concurrency.TrueParallelTest" />
+      <class name="org.testng.reflect.ExcludeSyntheticMethodsFromTemplateCallsTest"/>
+      <class name="test.cli.CliTest"/>
+      <class name="test.cli.github2974.OverrideGroupsCliTest"/>
+      <class name="org.testng.concurrency.ParallelSuiteTest"/>
+      <class name="test.simple.IncludedExcludedTest" />
+      <class name="test.reports.ReportTest" />
+      <class name="test.reports.XmlReporterTest"/>
+      <class name="test.reports.XmlReporterParametersTest"/>
+      <class name="test.reports.JqReportParametersTest"/>
+      <class name="test.reports.EmailableReporterParametersTest"/>
+      <class name="test.reports.PerSuiteXMLReporterTest"/>
+      <class name="test.annotationtransformer.AnnotationTransformerTest" />
+<!--
+      <class name="test.jar.JarTest" />
+ -->
+      <class name="test.xml.XmlVerifyTest" />
+      <class name="test.xml.XmlWeaverExtensionTest"/>
+      <class name="test.xml.issue2231.IssueTest"/>
+      <class name="test.xml.XMLStringBufferTest"/>
+      <class name="test.invokedmethodlistener.InvokedMethodListenerTest" />
+      <class name="test.testng249.VerifyTest"/>
+      <class name="test.testng195.AfterMethodTest" />
+      <class name="test.regression.BeforeTestFailingTest"/>
+      <class name="test.configuration.github1700.RunTest"/>
+      <class name="test.configuration.issue2432.IssueTest"/>
+      <class name="test.configuration.issue2426.IssueTest"/>
+      <class name="org.testng.aftergroups.AfterGroupsBehaviorTest"/>
+      <class name="test.testng285.TestNG285Test" />
+      <class name="test.failedreporter.FailedReporterTest" />
+      <class name="test.failedreporter.issue2517.DataProviderWithFactoryFailedReporterTest" />
+      <class name="test.failedreporter.issue2521.DataProviderWithFactoryMultiFailedReporterTest" />
+      <class name="test.attributes.AttributeTest"/>
+      <class name="test.attributes.issue2346.IssueTest"/>
+      <class name="test.verify.VerifyTest"/>
+      <class name="test.abstractconfmethod.C" />
+      <class name="org.testng.preserveorder.PreserveOrderTest" />
+      <class name="test.SerializationTest" />
+      <class name="test.CountTest" />
+      <class name="test.EclipseTest" />
+      <class name="test.ReporterApiTest" />
+      <class name="org.testng.reporters.TextReporterTest"/>
+      <class name="org.testng.reporters.VerboseReporterTest"/>
+      <class name="test.reports.UniqueReporterInjectionTest"/>
+      <class name="test.junitreports.JUnitReportsTest"/>
+      <class name="test.abstractmethods.AbstractTest" />
+      <class name="test.override.OverrideTest" />
+      <class name="org.testng.priority.PriorityTest" />
+      <class name="test.NestedStaticTest" />
+      <class name="test.configuration.ConfigurationListenerTest" />
+      <class name="test.groupinvocation.GroupSuiteTest" />
+      <class name="test.StaticTest" />
+      <class name="test.serviceloader.ServiceLoaderTest" />
+      <class name="test.commandline.CommandLineOverridesXml" />
+      <class name="test.jason.MainTest" />
+      <class name="test.bug90.Bug90Test" />
+      <class name="test.bug92.Bug92Test" />
+      <class name="test.ReturnValueTest" />
+      <class name="test.groupbug.GroupBugTest" />
+      <class name="org.testng.groups.issue1834.IssueTest"/>
+      <class name="org.testng.groups.issue182.IssueTest"/>
+      <class name="org.testng.groups.issue2152.IssueTest"/>
+      <class name="org.testng.groups.issue2232.IssueTest"/>
+      <class name="org.testng.parameters.ShadowTest" />
+      <class name="org.testng.parameters.ParameterOverrideTest" />
+      <class name="org.testng.parameters.ParameterInjectAndOptionTest" />
+      <class name="org.testng.parameters.ParametersPackageLevelMethodTest" />
+      <class name="org.testng.parameters.issue2238.IssueTest"/>
+      <class name="test.reports.FailedReporterTest" />
+      <class name="test.reports.EmailableReporterTest"/>
+      <class name="test.failedreporter.FailedReporterScenariosTest"/>
+      <class name="test.failedreporter.FailedReporterParametersTest"/>
+      <class name="test.reports.ReporterLogTest" />
+      <class name="org.testng.invocationcount.testng387.TestNG387"/>
+      <class name="test.testng1231.TestExecutionListenerInvocationOrder"/>
+      <class name="test.testng1232.TestListenerInstances"/>
+      <class name="org.testng.skip.BeforeClassSkipExceptionTest"/>
+      <class name="org.testng.conffailure.TestNG106"/>
+      <class name="test.issue107.Issue107Test"/>
+      <class name="test.test111.Test1" />
+      <class name="org.testng.preserveorder.TestNG173Test" />
+      <class name="test.listeners.ordering.ListenerInvocationDefaultBehaviorTest"/>
+      <class name="test.listeners.ordering.ListenerInvocationListenerInvocationDisabledBehaviorTest"/>
+      <class name="test.listeners.github551.Test551"/>
+      <class name="test.listeners.github1284.TestListeners"/>
+      <class name="test.listeners.github1735.ExecutionListenerTest"/>
+      <class name="test.listeners.github1602.IssueTest"/>
+      <class name="test.listeners.issue1777.IssueTest"/>
+      <class name="test.listeners.ListenersTest"/>
+      <class name="org.testng.skip.github1632.IssueTest"/>
+      <class name="test.listeners.issue2220.IssueTest"/>
+      <class name="test.listeners.issue2328.IssueTest"/>
+      <class name="test.listeners.factory.TestNGFactoryTest"/>
+      <class name="test_result.ResultStatusTest"/>
+      <class name="test_result.TestResultTest"/>
+      <class name="test.listeners.github1319.TestResultInstanceCheckTest"/>
+      <class name="org.testng.methodinterceptors.ParallelByInstancesInterceptorTest"/>
+      <class name="org.testng.parameters.github1417.TestParamsInjectionInBeforeClass"/>
+      <class name="test.order.OrderTest" />
+      <class name="org.testng.memory.MemoryLeakTestNg" />
+      <!-- TODO fix the random issue <class name="test.issue565.Issue565Test"/>-->
+      <class name="test.failedreporter.issue3111.FactoryInstanceFailedReporterTest"/>
+      <class name="test.failedreporter.skippedposition.SkippedPositionRerunTest"/>
+      <class name="org.testng.factory.issue3111.FactoryInstanceTest"/>
+      <class name="org.testng.factory.issue326.IssueTest"/>
+      <class name="org.testng.factory.issue553.IssueTest"/>
+      <class name="org.testng.factory.issue1041.IssueTest"/>
+      <class name="org.testng.factory.issue1924.IssueTest"/>
+      <class name="org.testng.factory.FactoryWithExcludedGroupTest" />
+      <class name="org.testng.factory.issue1745.Github1745Test"/>
+      <class name="org.testng.factory.lazy.LazyFactoryConstructionTest"/>
+      <class name="org.testng.factory.lazy.LazyFactoryResolutionMatrixTest"/>
+      <class name="org.testng.factory.lazy.LazyFactoryConfigMethodTest"/>
+      <class name="org.testng.factory.lazy.LazyFactoryConstructorFailureTest"/>
+      <class name="org.testng.factory.lazy.LazyFactoryMethodInterceptorTest"/>
+      <class name="org.testng.factory.lazy.LazyFactoryParallelTest"/>
+      <class name="test.objectfactory.ObjectFactoryTest"/>
+      <class name="test.github1490.VerifyDataProviderListener"/>
+      <class name="test.listeners.issue2456.IssueTest"/>
+      <class name="org.testng.methodselection.MethodSelectionTest"/>
+      <class name="test.beforegroups.BeforeGroupsTest"/>
+      <class name="org.testng.invocationcount.issue1719.IssueTest"/>
+      <class name="org.testng.internal.listeners.parameterindex.ParameterIndexListenerTest"/>
+    </classes>
+  </test>
+
+  <test name="Threads">
+    <groups>
+      <run>
+        <exclude name="broken" />
+      </run>
+    </groups>
+    <classes>
+      <class name="org.testng.concurrency.ThreadPoolSizeTest" />
+      <class name="org.testng.concurrency.ThreadPoolSizeWithTimeOutTest" />
+      <class name="org.testng.concurrency.ThreadTest" />
+    </classes>
+  </test>
+
+  <test name="Listeners">
+    <classes>
+      <class name="test.listeners.EndMillisShouldNotBeZeroTest" />
+      <class name="test.listeners.ResultEndMillisTest" />
+      <class name="test.listeners.ListenerTest"/>
+      <class name="test.listeners.SuiteAndInvokedMethodListenerTest" />
+      <class name="test.listeners.SuiteAndConfigurationListenerTest" />
+      <class name="test.listeners.ListenerInXmlTest" />
+      <class name="test.listeners.ExecutionListenerTest" />
+      <class name="test.listeners.ExecutionListenerAndSuiteListenerTest" />
+      <class name="test.listeners.ConfigurationListenerTest" />
+      <class name="test.multiplelisteners.TestMaker" />
+      <class name="test.listeners.github1130.GitHub1130Test"/>
+      <class name="test.listeners.github1296.GitHub1296Test"/>
+      <class name="test.listeners.github1465.IssueTest"/>
+      <class name="test.listeners.github2385.IssueTest"/>
+      <class name="test.listeners.github2522.IssueTest"/>
+    </classes>
+  </test>
+
+  <test name="Reflection">
+  <classes>
+    <class name="org.testng.reflect.ReflectionRecipesTest" />
+    <class name="org.testng.reflect.TestMethodMatcher" />
+    <class name="org.testng.reflect.ExecutableCacheClassLoaderTest" />
+    <class name="org.testng.reflect.ClassHelperCacheClassLoaderTest" />
+    <class name="org.testng.reflect.InterningRegressionTest" />
+  </classes>
+  </test>
+
+  <test name="Injection">
+    <classes>
+      <class name="test.inject.InjectTestContextTest"/>
+      <class name="test.inject.InjectBeforeMethodTest"/>
+      <class name="test.inject.InjectTestResultTest" />
+      <class name="test.inject.InjectDataProviderTest"/>
+      <class name="test.inject.NoInjectionTest" />
+      <class name="test.inject.NativeInjectionTest" />
+      <class name="test.inject.Github1298Test"/>
+      <class name="test.inject.ConfigurationResultCarriesItsMethodTest"/>
+      <class name="test.inject.Github1649Test"/>
+      <class name="test.inject.issue1994.IssueTest"/>
+      <class name="org.testng.parameters.resolver.ParameterResolverTest"/>
+      <class name="org.testng.parameters.resolver.MockitoParameterResolverTest"/>
+    </classes>
+  </test>
+
+  <!--  Keep this in its own <test> tag -->
+  <test name="BeforeMethod">
+    <classes>
+      <class name="test.configuration.BeforeMethodTest" />
+    </classes>
+  </test>
+
+  <test name="Basic" >
+    <classes>
+      <class name="test.sample.Basic2" />
+      <class name="test.sample.Basic1" />
+      <class name="test.Misc" />
+    </classes>
+  </test>
+
+  <test name="Exclusion">
+    <groups>
+      <run>
+        <exclude name="excludeThisGroup" />
+      </run>
+    </groups>
+    <classes>
+      <class name="test.Test2" />
+    </classes>
+  </test>
+
+  <test name="Dependents">
+    <parameter name="foo" value="Cedric" />
+    <classes>
+      <class name="org.testng.dependent.MissingGroupTest" />
+      <class name="org.testng.dependent.MissingMethodTest" />
+      <class name="org.testng.dependent.DependsOnMethodsWithSharedNamesTest" />
+      <class name="org.testng.dependent.GitHub261Test" />
+      <class name="org.testng.dependent.OrderMethodTest" />
+      <class name="org.testng.dependent.DependentTest" />
+      <class name="org.testng.dependent.SampleDependentTest" />
+      <class name="org.testng.dependent.SampleDependentMethods" />
+      <class name="org.testng.dependent.SampleDependentMethods3" />
+      <class name="org.testng.dependent.SampleDependentConfigurationMethods" />
+      <class name="org.testng.dependent.ClassDependsOnGroups"/>
+      <class name="org.testng.dependent.DependentAlwaysRunTest" />
+      <class name="org.testng.dependent.MultiGroupTest" />
+      <class name="org.testng.dependent.ImplicitGroupInclusionTest" />
+      <class name="org.testng.dependent.ClassWide1Test" />
+      <class name="org.testng.dependent.ClassWide2Test" />
+      <class name="org.testng.dependent.DepBugSampleTest" />
+      <class name="org.testng.dependent.DepBugVerifyTest" />
+      <class name="org.testng.dependent.DependsOnProtectedMethodTest" />
+      <class name="test.dependsongroup.DependsOnGroupsTest" />
+      <class name="org.testng.dependent.GroupByInstancesTest" />
+      <class name="org.testng.dependent.xml.GroupDependencyTest" />
+      <class name="org.testng.dependent.DependencyFixTest"/>
+      <class name="org.testng.dependent.issue1648.TestRunner"/>
+    </classes>
+  </test>
+
+  <test name="Inheritance">
+    <classes>
+      <class name="org.testng.inheritance.InheritanceConfigTest" />
+      <class name="org.testng.inheritance.ClassScopeTest" />
+      <class name="org.testng.inheritance.testng739.TestNG739"/>
+      <class name="org.testng.inheritance.testng234.PolymorphicFailureTest" />
+      <class name="org.testng.inheritance.testng471.TestNG471" />
+      <class name="org.testng.inheritance.github980.Github980Test"/>
+      <class name="org.testng.inheritance.github949.Github949Test"/>
+      <class name="org.testng.inheritance.issue2489.IssueTest"/>
+    </classes>
+  </test>
+
+  <!-- Test scopes -->
+
+  <parameter name="parameter" value="out" />
+
+  <test name="Test outer scope">
+    <groups>
+      <run>
+        <include name="outer-group" />
+      </run>
+    </groups>
+    <classes>
+      <class name="test.sample.Scope" />
+    </classes>
+  </test>
+
+  <test name="Test inner scope">
+    <parameter name="parameter" value="in" />
+    <groups>
+      <run>
+        <include name="inner-group" />
+      </run>
+    </groups>
+    <classes>
+      <class name="test.sample.Scope" />
+    </classes>
+  </test>
+
+  <test name="AfterClassCalledAtEnd">
+    <classes>
+      <class name="test.sample.AfterClassCalledAtEnd"/>
+    </classes>
+  </test>
+
+  <test name="Triangle">
+    <classes>
+      <class name="test.triangle.Child1" />
+      <class name="test.triangle.Child2" />
+    </classes>
+  </test>
+
+  <!-- note that CheckTriangePost must be run sequentially after Triangle-->
+  <test name="CheckTrianglePost">
+    <parameter name="expected-calls" value="2" />
+    <classes>
+      <class name="test.triangle.CheckCount"/>
+    </classes>
+  </test>
+
+  <!-- Test that we can declare groups and dependents on classes -->
+
+  <test name="Test class groups 1" >
+    <classes>
+      <class name="test.classgroup.Second" />
+      <class name="test.classgroup.First" />
+    </classes>
+  </test>
+
+    <test name="Test class groups 2" >
+    <classes>
+      <class name="test.classgroup.First" />
+      <class name="test.classgroup.Second" />
+    </classes>
+  </test>
+
+  <parameter name="factory-param" value="FactoryParam" />
+  <test name="Factory">
+    <classes>
+      <class name="org.testng.factory.FactoryTest" />
+      <class name="org.testng.factory.VerifyFactoryTest" />
+      <class name="org.testng.factory.FactoryInSeparateClassTest" />
+      <class name="org.testng.factory.Factory2Test" />
+      <class name="org.testng.factory.ObjectIdTest"/>
+
+      <class name="org.testng.factory.FactoryWithInstanceInfoTest" />
+      <class name="org.testng.factory.VerifyFactoryWithInstanceInfoTest" />
+      <class name="org.testng.factory.TestClassAnnotationTest" />
+
+      <class name="org.testng.factory.FactoryWithDataProviderTest" />
+      <class name="org.testng.factory.FactoryOrderMainTest" />
+      <class name="org.testng.factory.FactoryFailureTest" />
+
+      <class name="org.testng.factory.FactoryInSuperClassTest" />
+
+      <class name="org.testng.factory.classconf.XClassOrderWithFactoryTest" />
+      <class name="org.testng.factory.FactoryInterleavingTest"/>
+      <class name="org.testng.factory.FactoryDataProviderTest"/>
+      <class name="org.testng.factory.github1631.GitHub1631Tests"/>
+
+      <class name="org.testng.factory.DisabledFactoryTest"/>
+      <class name="org.testng.factory.FactoryAndTestMethodTest" />
+
+      <class name="org.testng.factory.FactoryIntegrationTest" />
+      <class name="org.testng.factory.EmptyFactoryDataProviderTest" />
+
+      <class name="org.testng.factory.nested.GitHub1307Test"/>
+      <class name="org.testng.factory.github1083.GitHub1083Test"/>
+      <class name="org.testng.factory.github1131.GitHub1131Test"/>
+
+    </classes>
+  </test>
+  <test name="factory test" parallel = "instances" thread-count="3" group-by-instances="true">
+    <classes>
+      <class name="org.testng.factory.github2428.IssueTest" />
+    </classes>
+  </test>
+
+  <test name="TimeOut">
+    <classes>
+      <class name="test.timeout.TimeOutTest" />
+      <class name="test.timeout.TimeOutFromXmlTest"/>
+      <class name="org.testng.timeout.issue1333.Issue1333Test"/>
+      <class name="org.testng.timeout.issue3513.Issue3513Test"/>
+      <class name="test.timeout.TimeOutIntegrationTest"/>
+      <class name="test.timeout.github2672.TimeoutStacktraceTest"/>
+<!--
+      <class name="test.timeout.TimeOutThreadLocalSampleTest"/>
+-->
+    </classes>
+  </test>
+
+  <test name="InvocationCount">
+    <parameter name="count" value="10" />
+    <classes>
+      <class name="test.InvocationAndSuccessPercentageTest" />
+      <class name="org.testng.invocationcount.CancelledInvocationReportingTest" />
+      <class name="org.testng.invocationcount.FailedInvocationCountTest" />
+      <class name="org.testng.invocationcount.FirstAndLastTimeTest" />
+    </classes>
+  </test>
+
+  <!-- Tests for included and excluded methods -->
+  <test name="Method1">
+    <classes>
+        <class name="test.methods.SampleMethod1">
+          <methods>
+            <include name="shouldRun1" />
+            <include name="shouldRun2" />
+          </methods>
+        </class>
+          <class name="test.methods.VerifyMethod1" />
+    </classes>
+  </test>
+
+  <test name="Method2">
+    <classes>
+        <class name="test.methods.SampleMethod1">
+          <methods>
+            <exclude name="shouldNotRun1" />
+            <exclude name="shouldNotRun2" />
+          </methods>
+        </class>
+        <class name="test.methods.VerifyMethod1" />
+    </classes>
+  </test>
+
+  <test name="Method3">
+    <classes>
+        <class name="test.methods.SampleMethod1">
+          <methods>
+            <exclude name=".*Not.*" />
+          </methods>
+        </class>
+        <class name="test.methods.VerifyMethod1" />
+    </classes>
+  </test>
+
+  <test name="Object factory">
+    <classes>
+      <class name="test.objectfactory.CustomFactoryTest" />
+      <class name="test.objectfactory.CombinedTestAndObjectFactoryTest" />
+      <class name="test.objectfactory.ObjectFactory2Test"/>
+    </classes>
+  </test>
+
+  <!-- Test parameters for constructors -->
+  <parameter name="string" value="Cedric" />
+  <parameter name="int" value="42" />
+  <parameter name="boolean" value="true" />
+  <parameter name="byte" value="43" />
+  <parameter name="char" value="c" />
+  <parameter name="double" value="44.0" />
+  <parameter name="float" value="45.0" />
+  <parameter name="long" value="46" />
+  <parameter name="short" value="47" />
+
+  <test name="Parameters for constructors">
+    <classes>
+      <class name="test.ParameterConstructorTest" />
+    </classes>
+  </test>
+
+  <test name="Excluded methods" >
+    <groups>
+      <run>
+        <include name="group1" />
+        <include name="group2" />
+      </run>
+    </groups>
+    <classes>
+      <class name="test.Exclude">
+    <methods>
+          <exclude name="excluded1" />
+          <exclude name="excluded2" />
+    </methods>
+      </class>
+    </classes>
+  </test>
+
+  <test name="Parameters in init 1">
+    <parameter name="param" value="value1"/>
+    <classes>
+      <class name="test.configuration.ConfigurationWithParameters"/>
+    </classes>
+  </test>
+
+  <test name="Parameters in init 2">
+  <parameter name="param" value="value2"/>
+    <classes>
+      <class name="test.configuration.ConfigurationWithParameters"/>
+    </classes>
+  </test>
+
+  <test name="Individual method">
+    <classes>
+      <class name="test.IndividualMethodsTest">
+        <methods>
+          <include name="testMethod"/>
+        </methods>
+      </class>
+    </classes>
+  </test>
+
+  <test name="Individual method with description">
+    <classes>
+      <class name="test.xml.TestNGContentHandlerTest"/>
+    </classes>
+  </test>
+
+  <test name="Method inheritance">
+    <classes>
+      <class name="org.testng.inheritance.DChild_2" />
+      <class name="org.testng.inheritance.VerifyTest" />
+    </classes>
+  </test>
+
+  <test name="Method selectors">
+    <classes>
+      <class name="test.methodselectors.MethodSelectorTest" />
+      <class name="org.testng.internal.RunInfoTest" />
+      <class name="test.methodselectors.ScriptTest" />
+      <class name="test.methodselectors.ScriptNegativeTest" />
+      <class name="test.methodselectors.MethodSelectorInSuiteTest" />
+    </classes>
+  </test>
+
+  <test name="Test order invocation">
+    <classes>
+      <class name="test.interleavedorder.InterleavedInvocationTest" />
+    </classes>
+  </test>
+
+  <test name="DataProvider">
+    <classes>
+      <class name="test.dataprovider.StaticDataProviderSampleWithoutGuiceSample" />
+      <class name="test.dataprovider.TestContextTest" />
+      <class name="test.dataprovider.FailingDataProviderTest" />
+      <class name="test.dataprovider.FailingIterableDataProviderTest" />
+      <class name="test.dataprovider.IndicesTest" />
+      <class name="test.dataprovider.DataProviderTest"/>
+      <class name="org.testng.dataprovider.EmptyDataProviderTest"/>
+      <class name="test.dataprovider.InterceptorTest"/>
+      <class name="test.dataprovider.issue3237.CacheTest"/>
+    </classes>
+  </test>
+
+  <test name="UniqueSuite">
+    <classes>
+      <class name="test.uniquesuite.TestBefore1" />
+      <class name="test.uniquesuite.TestBefore2" />
+      <class name="test.uniquesuite.TestAfter" />
+    </classes>
+  </test>
+
+  <test name="InheritGroups">
+    <groups>
+      <run>
+        <include name="group1" />
+      </run>
+    </groups>
+    <classes>
+      <class name="test.configuration.ConfigurationInheritGroupsSampleTest" />
+    </classes>
+  </test>
+
+<!--
+  <test name="Distributed">
+    <classes>
+      <class name="test.distributed.DistributedTest" />
+    </classes>
+  </test>
+-->
+
+  <test name="Nested" >
+    <groups>
+      <run>
+        <include name="unittest" />
+      </run>
+    </groups>
+
+     <packages>
+       <package name="test.nested.*"/>
+     </packages>
+  </test>
+
+  <test name="Hookable" >
+    <classes>
+      <class name="test.hook.HookableTest"/>
+      <class name="test.hook.issue2251.IssueTest"/>
+      <class name="test.hook.issue2257.IssueTest"/>
+      <class name="test.hook.issue2266.IssueTest"/>
+    </classes>
+  </test>
+
+  <test name="BeforeGroups-AfterGroups-1" >
+    <classes>
+      <class name="test.configuration.ConfigurationGroupsTest" />
+    </classes>
+  </test>
+
+  <test name="BeforeGroups-AfterGroups-2" >
+    <groups>
+      <run>
+        <include name="A" />
+        <include name="B" />
+      </run>
+    </groups>
+    <classes>
+      <class name="test.configuration.ConfigurationGroups8SampleTest" />
+    </classes>
+  </test>
+
+  <test name="JUnit">
+    <classes>
+      <class name="test.groovy.GroovyTest" />
+    </classes>
+  </test>
+
+  <!-- Group ordering 1 -->
+  <test name="Class Run">
+    <groups>
+      <run>
+        <include name="a"/>
+      </run>
+    </groups>
+    <classes>
+      <class name="test.regression.groupsordering.A" />
+      <class name="test.regression.groupsordering.B" />
+    </classes>
+  </test>
+
+  <!-- Group ordering 2 -->
+  <test name="Groups Run">
+    <groups>
+      <run>
+        <include name="a" />
+      </run>
+    </groups>
+    <classes>
+      <class name="test.regression.groupsordering.A" />
+      <class name="test.regression.groupsordering.B" />
+    </classes>
+  </test>
+
+  <test name="External group invocation">
+    <groups>
+      <run>
+        <include name="a" />
+      </run>
+    </groups>
+    <classes>
+      <class name="test.groupinvocation.GroupConfiguration" />
+      <class name="test.groupinvocation.DummyTest" />
+    </classes>
+  </test>
+
+  <test name="SkipExceptions">
+    <classes>
+      <class name="test.skipex.SkippedExceptionTest" />
+      <class name="test.skipex.SkipAndExpectedTest" />
+      <class name="org.testng.skip.ReasonForSkipTest"/>
+    </classes>
+  </test>
+
+  <test name="RetryAnalyzer">
+    <classes>
+      <class name="test.retryAnalyzer.RetryAnalyzerTest" />
+      <class name="test.retryAnalyzer.ExitCodeTest" />
+      <class name="test.retryAnalyzer.dataprovider.RetryAnalyzerWithDataProviderTest" />
+      <class name="test.retryAnalyzer.dataprovider.RetryAnalyzerWithComplexDataProviderTest" />
+      <class name="test.retryAnalyzer.issue2148.IssueTest"/>
+    </classes>
+  </test>
+
+  <test name="MethodInterceptor">
+    <classes>
+      <class name="org.testng.methodinterceptors.MethodInterceptorTest" />
+      <class name="org.testng.methodinterceptors.Issue392Test" />
+      <class name="org.testng.methodinterceptors.Issue521Test" />
+      <class name="org.testng.methodinterceptors.MultipleInterceptorsTest" />
+      <class name="org.testng.methodinterceptors.CustomInterceptorTest"/>
+      <class name="org.testng.methodinterceptors.Issue1263Test"/>
+    </classes>
+  </test>
+
+  <test name="Utils">
+    <classes>
+      <class name="org.testng.internal.UtilsTest" />
+      <class name="org.testng.internal.ConstructorOrMethodTest"/>
+      <class name="org.testng.internal.ExecutableCacheTest"/>
+      <class name="org.testng.internal.ClassHelperTest"/>
+      <class name="org.testng.internal.ClassHelperCacheTest"/>
+      <class name="org.testng.internal.TestResultParametersTest"/>
+      <class name="org.testng.internal.ParametersTest"/>
+      <class name="org.testng.internal.objects.InstanceCreatorTest"/>
+      <class name="org.testng.util.StringsTest"/>
+      <class name="org.testng.reflect.TestFileToClass"/>
+    </classes>
+  </test>
+
+  <test name="Reporters">
+    <classes>
+      <class name="org.testng.reporters.jq.ChronologicalPanelTest" />
+      <class name="org.testng.reporters.jq.TimesPanelTest" />
+      <class name="org.testng.reporters.jq.ModelParametersTest" />
+      <class name="org.testng.reporters.jq.BaseMultiSuitePanelTest" />
+      <class name="org.testng.reporters.XmlCharFilteringWriterTest" />
+      <class name="org.testng.reporters.FileStringBufferTest" />
+      <class name="org.testng.reporters.JUnitXMLReporterTest" />
+      <class name="org.testng.reporters.JUnitReportTimestampTest" />
+      <class name="org.testng.internal.reporters.ParameterValueTest" />
+      <class name="org.testng.internal.reporters.ParameterSnapshotsTest" />
+      <class name="org.testng.internal.reporters.ParameterSnapshotLifecycleTest" />
+      <class name="org.testng.internal.reporters.ParameterAnnouncementTest" />
+      <class name="org.testng.internal.reporters.ParameterSnapshotWiringTest" />
+      <class name="org.testng.internal.reporters.PassedConfigurationSnapshotTest" />
+    </classes>
+  </test>
+
+  <test name="Invoker">
+    <classes>
+      <class name="test.groupinvocation.InvokerTest"/>
+    </classes>
+  </test>
+
+  <test name="ConfigFailurePolicy">
+    <classes>
+      <class name="test.configurationfailurepolicy.FailurePolicyTest" />
+      <class name="test.configurationfailurepolicy.issue2731.IssueTest" />
+    </classes>
+  </test>
+
+  <test name="Nested2">
+    <packages>
+      <package name="test.nested2" />
+    </packages>
+  </test>
+
+  <test name="Guice">
+    <parameter name="inject" value="guice" />
+    <classes>
+      <class name="test.guice.GuiceTest" />
+      <class name="test.guice.GuiceInheritanceTest" />
+      <class name="test.guice.GuiceModuleFactoryTest" />
+      <class name="test.guice.issue279.IssueTest"/>
+    </classes>
+  </test>
+
+  <test name="Guice JIT Binding">
+    <classes>
+      <class name="test.guice.jitbinding.JitBindingTest" />
+    </classes>
+  </test>
+
+  <test name="Listener invokers">
+    <packages>
+      <package name="org.testng.internal.invokers"/>
+    </packages>
+  </test>
+
+  <test name="XML">
+    <classes>
+      <class name="org.testng.xml.SuiteXmlParserTest" />
+      <class name="org.testng.xml.XmlSuiteTest"/>
+      <class name="org.testng.xml.internal.XmlSuiteUtilsTest"/>
+      <class name="org.testng.xml.XmlTestTest"/>
+      <class name="org.testng.xml.ParserTest"/>
+      <class name="org.testng.xml.XmlRoundTripTest"/>
+      <class name="org.testng.xml.DeprecatedToXmlShimTest"/>
+      <class name="org.testng.xml.XMLParserTest"/>
+      <class name="org.testng.xml.XmlValidationTest"/>
+      <class name="org.testng.xml.XmlPrologueTest"/>
+      <class name="org.testng.xml.XsdValidationTest"/>
+      <class name="org.testng.xml.SchemaConsistencyTest"/>
+    </classes>
+  </test>
+
+  <test name="Sanity Check">
+    <classes>
+      <class name="test.sanitycheck.CheckTestNamesTest" />
+      <class name="test.sanitycheck.CheckSuiteNamesTest" />
+    </classes>
+  </test>
+
+  <test name="TestNames">
+    <classes>
+      <class name="org.testng.xml.internal.TestNamesMatcherTest"/>
+    </classes>
+  </test>
+
+  <test name="Configuration">
+    <classes>
+      <class name="test.configuration.BaseGroupsTest" />
+      <class name="test.configuration.BeforeTestOrderingTest" />
+      <class name="test.configuration.ConfigurationTest"/>
+      <class name="test.configuration.GroupsTest"/>
+      <class name="test.configuration.BeforeMethodWithGroupFiltersTest" />
+      <class name="test.configuration.AfterMethodWithGroupFiltersTest" />
+      <class name="test.configuration.ReflectMethodParametrizedConfigurationMethodTest" />
+      <class name="test.configuration.SuiteFactoryOnceTest" />
+      <class name="test.configuration.SingleConfigurationTest" />
+      <class name="test.configuration.github1625.TestRunnerIssue1625"/>
+      <class name="test.configuration.issue1346.IssueTest"/>
+      <class name="test.configuration.issue1753.IssueTest"/>
+      <class name="test.configuration.issue2400.IssueTest"/>
+      <class name="test.configuration.BeforeClassTest"/>
+      <class name="test.configuration.issue2209.IssueTest"/>
+      <class name="test.configuration.issue2254.IssueTest"/>
+      <class name="test.configuration.issue2663.IssueTest"/>
+      <class name="test.configuration.issue3239.IssueTest"/>
+    </classes>
+  </test>
+
+  <test name="Issue 107">
+    <classes>
+    </classes>
+  </test>
+
+  <test name="@Test(enable)">
+    <classes>
+      <class name="test.enable.EnableTest"/>
+      <class name="test.ignore.IgnoreTest"/>
+    </classes>
+  </test>
+
+  <test name="Name">
+    <classes>
+      <class name="test.name.NameTest" />
+      <class name="test.name.github1046.TestCustomNamesForTests"/>
+    </classes>
+  </test>
+
+  <test name = "Parallelization">
+    <classes>
+      <class name="org.testng.concurrency.parallelization.ParallelByMethodsTestCase1Scenario1"/>
+      <class name="org.testng.concurrency.parallelization.ParallelByMethodsTestCase1Scenario2"/>
+      <class name="org.testng.concurrency.parallelization.ParallelByMethodsTestCase2Scenario1"/>
+      <class name="org.testng.concurrency.parallelization.ParallelByMethodsTestCase2Scenario2"/>
+      <class name="org.testng.concurrency.parallelization.ParallelByMethodsTestCase3Scenario1"/>
+      <class name="org.testng.concurrency.parallelization.ParallelByMethodsTestCase3Scenario2"/>
+      <class name="org.testng.concurrency.parallelization.ParallelByMethodsTestCase4Scenario1"/>
+      <class name="org.testng.concurrency.parallelization.ParallelByMethodsTestCase5Scenario1"/>
+      <class name="org.testng.concurrency.parallelization.ParallelByMethodsTestCase5Scenario2"/>
+      <class name="org.testng.concurrency.parallelization.ParallelByMethodsTestCase6Scenario1"/>
+      <class name="org.testng.concurrency.parallelization.ParallelByMethodsTestCase7Scenario1"/>
+      <class name="org.testng.concurrency.parallelization.ParallelByMethodsTestCase7Scenario2"/>
+      <class name="org.testng.concurrency.parallelization.ParallelByMethodsTestCase8Scenario1"/>
+    </classes>
+  </test>
+
+  <test name="Efficient Thread Use With Priority">
+    <classes>
+      <class name="org.testng.priority.EfficientPriorityParallelizationTest"/>
+      <class name="org.testng.priority.EfficientPriorityParallelizationTest2"/>
+    </classes>
+  </test>
+
+  <test name="Jar_Related_tests">
+    <classes>
+      <class name="org.testng.JarFileUtilsTest"/>
+    </classes>
+  </test>
+
+  <test name="TestRunner_unit_tests">
+    <classes>
+      <class name="org.testng.TestRunnerTest"/>
+    </classes>
+  </test>
+
+  <test name="TestClass_unit_tests">
+    <classes>
+      <class name="org.testng.TestClassConfigurationLookupTest"/>
+    </classes>
+  </test>
+
+  <test name="XmlReporter_duration_tests">
+    <classes>
+      <class name="org.testng.reporters.AbstractXmlReporterDurationTest"/>
+    </classes>
+  </test>
+
+  <test name="TestNG_unit_tests">
+    <classes>
+      <class name="org.testng.TestNGRunSuitesLocallyTest"/>
+    </classes>
+  </test>
+
+  <!--This test depends on System properties. So its intentionally being run at the end
+  because the toggling of the system property will affect other tests -->
+  <test name = "RunAtLast">
+    <classes>
+      <class name="test.dataprovider.issue128.DataProviderParametersMismatchTest"/>
+    </classes>
+  </test>
+
+  <test name = "dryRun">
+    <classes>
+      <class name="org.testng.DryRunTest"/>
+    </classes>
+  </test>
+
+  <test name="RunOrderingTest">
+    <classes>
+      <class name="org.testng.factory.EnsureInstancesAreOrderedViaFactories"/>
+    </classes>
+  </test>
+
+  <test name="threadAffinity">
+    <classes>
+      <class name="org.testng.concurrency.parallelization.ThreadAffinityTest"/>
+    </classes>
+  </test>
+
+  <test name="Default method tests">
+    <classes>
+      <class name="test.defaultmethods.DefaultMethodTest"/>
+    </classes>
+  </test>
+
+  <test name="Custom attributes tests">
+    <classes>
+      <class name="test.custom.CustomAttributeTest"/>
+    </classes>
+  </test>
+
+  <test name="GITHUB-2195">
+    <classes>
+      <class name="org.testng.internal.MethodHelperTest"/>
+    </classes>
+  </test>
+
+  <test name="GITHUB-2273">
+    <classes>
+      <class name="org.testng.internal.objects.GuiceHelperTest"/>
+    </classes>
+  </test>
+
+  <test name="GITHUB-2440">
+    <classes>
+      <class name="test.timeout.github2440.TimeoutWithNoExecutorTest"/>
+    </classes>
+  </test>
+
+  <test name="GITHUB-2469">
+    <classes>
+      <class name="test.listeners.AlterSuiteListenerTest"/>
+    </classes>
+  </test>
+
+  <test name="Kotlin">
+    <classes>
+      <class name="org.testng.BasicTest"/>
+      <class name="org.testng.dataprovider.DynamicDataProviderLoadingTest" />
+    </classes>
+  </test>
+</suite>

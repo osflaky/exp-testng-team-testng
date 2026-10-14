@@ -1,0 +1,60 @@
+package test.failedreporter.issue2521;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
+import org.testng.TestNG;
+import org.testng.annotations.AfterMethod;
+import org.testng.annotations.BeforeMethod;
+import org.testng.annotations.Test;
+import test.SimpleBaseTest;
+
+public class DataProviderWithFactoryMultiFailedReporterTest extends SimpleBaseTest {
+  private File mTempDirectory;
+
+  @BeforeMethod
+  public void setUp() {
+    mTempDirectory = createDirInTempDir("testng-tmp-" + System.currentTimeMillis() % 1000);
+  }
+
+  @AfterMethod
+  public void tearDown() {
+    deleteDir(mTempDirectory);
+  }
+
+  /**
+   * Still one grouped {@code <include>} per method rather than one per failure, which is what this
+   * issue was about; the failing instances just moved to the attribute that means "factory
+   * instance".
+   */
+  @Test
+  public void multiFailedMethodWithDataProviderAndFactoryShouldGroupTheFailedInstances() {
+    testFailedReporter(
+        new String[] {"f1"},
+        "<include name=\"%s\" factory-instances=\"0 2\"/>",
+        DataProviderWithFactoryMultiFailedReporterSample.class);
+  }
+
+  private void testFailedReporter(String[] expectedMethods, String expectedLine, Class<?>... cls) {
+    triggerTest(cls);
+    runAssertions(mTempDirectory, expectedMethods, expectedLine, 1);
+  }
+
+  private void triggerTest(Class<?>... cls) {
+    TestNG tng = create(mTempDirectory.toPath(), cls);
+    tng.setUseDefaultListeners(true);
+    tng.run();
+  }
+
+  private static void runAssertions(
+      File outputDir, String[] expectedMethods, String expectedLine, int expected) {
+    File failed = new File(outputDir, "testng-failed.xml");
+    for (String s : expectedMethods) {
+      List<String> resultLines = new ArrayList<>();
+      grep(failed, String.format(expectedLine, s), resultLines);
+      assertThat(resultLines.size()).isEqualTo(expected);
+    }
+  }
+}

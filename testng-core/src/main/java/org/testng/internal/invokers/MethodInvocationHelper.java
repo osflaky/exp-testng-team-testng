@@ -1,0 +1,560 @@
+package org.testng.internal.invokers;
+
+import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
+import java.util.stream.Stream;
+import org.jspecify.annotations.Nullable;
+import org.testng.IConfigurable;
+import org.testng.IConfigureCallBack;
+import org.testng.IHookCallBack;
+import org.testng.IHookable;
+import org.testng.ITestContext;
+import org.testng.ITestNGMethod;
+import org.testng.ITestResult;
+import org.testng.TestNGException;
+import org.testng.TestNotInvokedException;
+import org.testng.internal.ConstructorOrMethod;
+import org.testng.internal.IConfiguration;
+import org.testng.internal.MethodHelper;
+import org.testng.internal.Utils;
+import org.testng.internal.annotations.IAnnotationFinder;
+import org.testng.internal.collections.ArrayIterator;
+import org.testng.internal.collections.CloseableIterator;
+import org.testng.internal.collections.OneToTwoDimArrayIterator;
+import org.testng.internal.collections.Pair;
+import org.testng.internal.collections.ResourceAwareIterator;
+import org.testng.internal.invokers.InvokeMethodRunnable.TestNGRuntimeException;
+import org.testng.internal.thread.TestNGThreadFactory;
+import org.testng.internal.thread.ThreadExecutionException;
+import org.testng.internal.thread.ThreadTimeoutException;
+import org.testng.internal.thread.ThreadUtil;
+import org.testng.xml.XmlSuite;
+
+/** Collections of helper methods to help deal with invocation of TestNG methods */
+public class MethodInvocationHelper {
+
+  /**
+   * How long, in milliseconds, we are willing to wait for the worker thread to even <em>start</em>
+   * executing a timed-out method before declaring an infrastructure failure. This is intentionally
+   * generous: thread-pool start-up and OS scheduling normally take well under a millisecond, so
+   * this grace period is only ever consumed under pathological load or thread-pool starvation. It
+   * is deliberately not counted against the user's time-out budget.
+   */
+  private static final long TIMEOUT_STARTUP_GRACE_MILLIS = 10_000;
+
+  /**
+   * Polling interval, in milliseconds, used while waiting for the worker thread to start. Short
+   * enough to react promptly once the method begins, so a method that hangs immediately still times
+   * out close to its configured time-out rather than after the whole start-up grace period.
+   */
+  private static final long TIMEOUT_STARTUP_POLL_MILLIS = 10;
+
+  protected static Object invokeMethodNoCheckedException(
+      Method thisMethod, @Nullable Object instance, List<Object> parameters) {
+    try {
+      return invokeMethod(thisMethod, instance, parameters);
+    } catch (InvocationTargetException | IllegalAccessException e) {
+      // Don't throw TestNGException here or this test won't be reported as a
+      // skip or failure
+      throw new RuntimeException(e.getCause());
+    }
+  }
+
+  protected static void invokeMethodConsideringTimeout(
+      ITestNGMethod tm,
+      ConstructorOrMethod method,
+      Object targetInstance,
+      Object[] params,
+      ITestResult testResult,
+      IConfiguration config)
+      throws Throwable {
+    if (MethodHelper.calculateTimeOut(tm) <= 0) {
+      MethodInvocationHelper.invokeMethod(method.requireMethod(), targetInstance, params);
+    } else {
+      MethodInvocationHelper.invokeWithTimeout(config, tm, targetInstance, params, testResult);
+      if (!testResult.isSuccess()) {
+        // A time out happened
+        // invokeWithTimeout only leaves the result unsuccessful by recording what went wrong.
+        Throwable ex =
+            Objects.requireNonNull(
+                testResult.getThrowable(), "a failed invocation records what it failed with");
+        testResult.setStatus(ITestResult.FAILURE);
+        Throwable cause = ex.getCause() == null ? ex : ex.getCause();
+        testResult.setThrowable(cause);
+        throw cause;
+      }
+    }
+  }
+
+  protected static Object invokeMethod(
+      Method thisMethod, @Nullable Object instance, List<Object> parameters)
+      throws InvocationTargetException, IllegalAccessException {
+    return invokeMethod(thisMethod, instance, parameters.toArray(new Object[0]));
+  }
+
+  protected static Object invokeMethod(
+      Method thisMethod, @Nullable Object instance, Object[] parameters)
+      throws InvocationTargetException, IllegalAccessException {
+    Utils.checkInstanceOrStatic(instance, thisMethod);
+
+    // TESTNG-326, allow IObjectFactory to load from non-standard classloader
+    // If the instance has a different classloader, its class won't match the
+    // method's class
+    if (instance != null && !thisMethod.getDeclaringClass().isAssignableFrom(instance.getClass())) {
+      // for some reason, we can't call this method on this class
+      // is it static?
+      boolean isStatic = Modifier.isStatic(thisMethod.getModifiers());
+      if (!isStatic) {
+        // not static, so grab a method with the same name and signature in this case
+        Class<?> clazz = instance.getClass();
+        try {
+          thisMethod = clazz.getMethod(thisMethod.getName(), thisMethod.getParameterTypes());
+        } catch (Exception e) {
+          // ignore, the method may be private
+          boolean found = false;
+          for (; clazz != null; clazz = clazz.getSuperclass()) {
+            try {
+              thisMethod =
+                  clazz.getDeclaredMethod(thisMethod.getName(), thisMethod.getParameterTypes());
+              found = true;
+              break;
+            } catch (Exception e2) {
+            }
+          }
+          if (!found) {
+            // should we assert here? Or just allow it to fail on invocation?
+            if (thisMethod.getDeclaringClass().equals(instance.getClass())) {
+              throw new RuntimeException(
+                  "Can't invoke method " + thisMethod + ", probably due to classloader mismatch");
+            }
+            throw new RuntimeException(
+                "Can't invoke method "
+                    + thisMethod
+                    + " on this instance of "
+                    + instance.getClass()
+                    + " due to class mismatch");
+          }
+        }
+      }
+    }
+
+    if (!Modifier.isPublic(thisMethod.getModifiers()) || !canAccess(thisMethod)) {
+      try {
+        thisMethod.setAccessible(true);
+      } catch (SecurityException e) {
+        throw new TestNGException(thisMethod.getName() + " must be public", e);
+      }
+    }
+    return thisMethod.invoke(instance, parameters);
+  }
+
+  @SuppressWarnings("deprecation")
+  private static boolean canAccess(Method thisMethod) {
+    return thisMethod.isAccessible();
+  }
+
+  @SuppressWarnings("unchecked")
+  public static CloseableIterator<Object @Nullable []> invokeDataProvider(
+      @Nullable Object instance,
+      Method dataProvider,
+      ITestNGMethod method,
+      ITestContext testContext,
+      @Nullable Object fedInstance,
+      IAnnotationFinder annotationFinder) {
+    List<Object> parameters =
+        getParameters(dataProvider, method, testContext, fedInstance, annotationFinder);
+    Object result = invokeMethodNoCheckedException(dataProvider, instance, parameters);
+    if (result == null) {
+      throw new TestNGException("Data Provider " + dataProvider + " returned a null value");
+    }
+    // If it returns an Object[][] or Object[], convert it to an Iterator<Object[]>
+    if (result instanceof Object[][]) {
+      return new ResourceAwareIterator<>(new ArrayIterator((Object[][]) result), null);
+    } else if (result instanceof Object[]) {
+      return new ResourceAwareIterator<>(new OneToTwoDimArrayIterator((Object[]) result), null);
+    } else if (result instanceof Iterator) {
+      return ResourceAwareIterator.forDataProvider(
+          (Iterator<Object>) result, dataProvider.getGenericReturnType(), null);
+    } else if (result instanceof Stream) {
+      // A Stream is AutoCloseable and must be released once the rows have been consumed, so keep a
+      // handle on it and hand it to the iterator as the resource to close. Iteration stays lazy: we
+      // drive the Stream through its own iterator() rather than collecting it eagerly.
+      Stream<Object> stream = (Stream<Object>) result;
+      return ResourceAwareIterator.forDataProvider(
+          stream.iterator(), dataProvider.getGenericReturnType(), stream);
+    }
+    throw new TestNGException(
+        "Data Provider "
+            + dataProvider
+            + " must return"
+            + " either Object[][] or Object[] or Iterator<Object[]> or Iterator<Object>"
+            + " or Stream<Object[]> or Stream<Object>, not "
+            + dataProvider.getReturnType());
+  }
+
+  private static List<Object> getParameters(
+      Method dataProvider,
+      ITestNGMethod method,
+      ITestContext testContext,
+      @Nullable Object fedInstance,
+      IAnnotationFinder annotationFinder) {
+    // Go through all the parameters declared on this Data Provider and
+    // make sure we have at most one Method and one ITestContext.
+    // Anything else is an error
+    List<Object> parameters = new ArrayList<>();
+    Collection<Pair<Integer, Class<?>>> unresolved = new ArrayList<>();
+    ConstructorOrMethod com = method.getConstructorOrMethod();
+    int i = 0;
+    for (Class<?> cls : dataProvider.getParameterTypes()) {
+      if (cls.equals(Method.class)) {
+        parameters.add(com.getMethod());
+      } else if (cls.equals(Constructor.class)) {
+        parameters.add(com.getConstructor());
+      } else if (cls.equals(ConstructorOrMethod.class)) {
+        parameters.add(com);
+      } else if (cls.equals(ITestNGMethod.class)) {
+        parameters.add(method);
+      } else if (cls.equals(ITestContext.class)) {
+        parameters.add(testContext);
+      } else if (cls.equals(Class.class)) {
+        parameters.add(com.getDeclaringClass());
+      } else {
+        boolean isTestInstance = annotationFinder.hasTestInstance(dataProvider, i);
+        if (isTestInstance) {
+          parameters.add(fedInstance);
+        } else {
+          unresolved.add(new Pair<>(i, cls));
+        }
+      }
+      i++;
+    }
+    if (!unresolved.isEmpty()) {
+      StringBuilder sb = new StringBuilder();
+      sb.append("Some DataProvider ").append(dataProvider).append(" parameters unresolved: ");
+      for (Pair<Integer, Class<?>> pair : unresolved) {
+        sb.append(" at ").append(pair.first()).append(" type ").append(pair.second()).append("\n");
+      }
+      throw new TestNGException(sb.toString());
+    }
+    return parameters;
+  }
+
+  protected static boolean invokeHookable(
+      final Object testInstance,
+      final Object[] parameters,
+      final IHookable hookable,
+      final Method thisMethod,
+      final ITestResult testResult)
+      throws Throwable {
+    final AtomicReference<@Nullable Throwable> error = new AtomicReference<>();
+    AtomicBoolean wasCalled = new AtomicBoolean(false);
+
+    IHookCallBack callback =
+        new IHookCallBack() {
+          @Override
+          public void runTestMethod(ITestResult tr) {
+            try {
+              wasCalled.set(true);
+              invokeMethod(thisMethod, testInstance, parameters);
+              error.set(null);
+              tr.setThrowable(null);
+            } catch (Throwable t) {
+              error.set(t);
+              tr.setThrowable(t); // make Throwable available to IHookable
+            }
+          }
+
+          @Override
+          public Object[] getParameters() {
+            return parameters;
+          }
+        };
+    hookable.run(callback, testResult);
+    Throwable thrown = error.get();
+    if (thrown != null) {
+      throw thrown;
+    }
+    return wasCalled.get();
+  }
+
+  /**
+   * Invokes a method on a separate thread in order to allow us to timeout the invocation. It uses
+   * as implementation an <code>Executor</code> and a <code>CountDownLatch</code>.
+   */
+  protected static void invokeWithTimeout(
+      IConfiguration config,
+      ITestNGMethod tm,
+      Object instance,
+      Object[] parameterValues,
+      ITestResult testResult)
+      throws InterruptedException, ThreadExecutionException {
+    invokeWithTimeout(config, tm, instance, parameterValues, testResult, null);
+  }
+
+  protected static boolean invokeWithTimeout(
+      IConfiguration config,
+      ITestNGMethod tm,
+      Object instance,
+      Object[] parameterValues,
+      ITestResult testResult,
+      @Nullable IHookable hookable)
+      throws InterruptedException, ThreadExecutionException {
+    if (ThreadUtil.isTestNGThread()
+        && Utils.requireTestContextOf(testResult).getCurrentXmlTest().getParallel()
+            != XmlSuite.ParallelMode.TESTS) {
+      // We are already running in our own executor, don't create another one (or we will
+      // lose the time out of the enclosing executor).
+      return invokeWithTimeoutWithNoExecutor(tm, instance, parameterValues, testResult, hookable);
+    } else {
+      return invokeWithTimeoutWithNewExecutor(
+          config, tm, instance, parameterValues, testResult, hookable);
+    }
+  }
+
+  private static boolean invokeWithTimeoutWithNoExecutor(
+      ITestNGMethod tm,
+      Object instance,
+      Object[] parameterValues,
+      ITestResult testResult,
+      @Nullable IHookable hookable) {
+
+    Consumer<Throwable> failureMarker =
+        t -> {
+          testResult.setThrowable(t);
+          testResult.setStatus(ITestResult.FAILURE);
+        };
+
+    InvokeMethodRunnable imr =
+        new InvokeMethodRunnable(tm, instance, parameterValues, hookable, testResult);
+    long startTime = System.currentTimeMillis();
+    long realTimeOut = MethodHelper.calculateTimeOut(tm);
+    boolean notTimedout = true;
+    AtomicBoolean finished = new AtomicBoolean(false);
+    AtomicBoolean interruptByMonitor = new AtomicBoolean(false);
+    Thread monitorThread = null;
+    boolean wasInvoked = false;
+    try {
+      Thread currentThread = Thread.currentThread();
+      monitorThread =
+          new Thread(
+              () -> {
+                try {
+                  TimeUnit.MILLISECONDS.sleep(realTimeOut);
+                } catch (InterruptedException e) {
+                  Thread.currentThread().interrupt();
+                }
+                if (!finished.get()) {
+                  interruptByMonitor.set(true);
+                  currentThread.interrupt();
+                }
+              });
+      monitorThread.start();
+      wasInvoked = imr.run();
+      notTimedout = System.currentTimeMillis() <= startTime + realTimeOut;
+      if (notTimedout) {
+        testResult.setStatus(ITestResult.SUCCESS);
+      } else {
+        failureMarker.accept(new ThreadTimeoutException(tm, realTimeOut));
+      }
+      return wasInvoked;
+    } catch (TestNotInvokedException e) {
+      failureMarker.accept(e.getCause());
+      return wasInvoked;
+    } catch (Exception ex) {
+      Throwable e = ex.getCause();
+      boolean wasTimedOut = !(notTimedout && !interruptByMonitor.get());
+      if (wasTimedOut) {
+        e = new ThreadTimeoutException(tm, realTimeOut, e);
+      } else {
+        if (e instanceof TestNGRuntimeException) {
+          e = e.getCause();
+        }
+      }
+      failureMarker.accept(e);
+      return wasInvoked;
+    } finally {
+      finished.set(true);
+      Optional.ofNullable(monitorThread).filter(Thread::isAlive).ifPresent(Thread::interrupt);
+    }
+  }
+
+  private static boolean invokeWithTimeoutWithNewExecutor(
+      IConfiguration configuration,
+      ITestNGMethod tm,
+      Object instance,
+      Object[] parameterValues,
+      ITestResult testResult,
+      @Nullable IHookable hookable)
+      throws InterruptedException, ThreadExecutionException {
+    ExecutorService exec = ThreadUtil.createExecutor(configuration, 1, tm.getMethodName());
+
+    InvokeMethodRunnable imr =
+        new InvokeMethodRunnable(tm, instance, parameterValues, hookable, testResult);
+    Future<Boolean> future = exec.submit(imr);
+    exec.shutdown();
+    long realTimeOut = MethodHelper.calculateTimeOut(tm);
+
+    // The time-out must measure the method's own execution time, not the wall-clock time since we
+    // started waiting: thread-pool start-up and OS scheduling can otherwise consume the whole
+    // budget
+    // under load and produce spurious time-outs. We therefore start the clock from the moment the
+    // worker thread actually begins running the method, while still bounding how long we wait for
+    // it
+    // to start so a thread that can never be scheduled cannot hang us forever.
+    //
+    // The start-up grace scales with the execution time-out (rather than being a flat cap) so that
+    // we never wait less for the worker to start than the old implementation would have waited in
+    // total: a caller who tolerates a long execution time-out implicitly tolerates at least that
+    // long for the method to get going. In practice scheduling takes well under a millisecond, so
+    // this bound is only ever reached under pathological thread-pool starvation.
+    long startupGraceMillis = Math.max(realTimeOut, TIMEOUT_STARTUP_GRACE_MILLIS);
+    long startupDeadline = System.currentTimeMillis() + startupGraceMillis;
+    boolean finished = false;
+    while (!finished) {
+      long executionStartMillis = imr.getExecutionStartMillis();
+      long waitMillis;
+      if (executionStartMillis < 0) {
+        // The worker thread has not started executing the method yet. Poll in short intervals so we
+        // react promptly once it does, but give up if it never starts within the start-up grace.
+        long remainingStartup = startupDeadline - System.currentTimeMillis();
+        if (remainingStartup <= 0) {
+          break;
+        }
+        waitMillis = Math.min(remainingStartup, TIMEOUT_STARTUP_POLL_MILLIS);
+      } else {
+        // The method is running: it has until its execution start plus the configured time-out.
+        waitMillis = executionStartMillis + realTimeOut - System.currentTimeMillis();
+        if (waitMillis <= 0) {
+          break;
+        }
+      }
+      finished = exec.awaitTermination(waitMillis, TimeUnit.MILLISECONDS);
+    }
+
+    if (!finished) {
+      // A genuinely slow method (one that started but ran too long) keeps the canonical message so
+      // existing tooling and assertions still recognise it. Only a method that never started gets
+      // the infrastructure diagnostic, since that is not the user's method being slow.
+      ThreadTimeoutException exception =
+          imr.getExecutionStartMillis() < 0
+              ? new ThreadTimeoutException(buildNeverStartedMessage(tm, startupGraceMillis))
+              : new ThreadTimeoutException(tm, realTimeOut);
+      StackTraceElement[] realStackTrace = getRunningMethodStackTrace(exec);
+      if (realStackTrace != null) {
+        exception.setStackTrace(realStackTrace);
+      }
+      // shutdown after getting real stacktrace from thread
+      exec.shutdownNow();
+      testResult.setThrowable(exception);
+      testResult.setStatus(ITestResult.FAILURE);
+      return false;
+    } else {
+      Utils.log(
+          "Invoker " + Thread.currentThread().hashCode(),
+          3,
+          "Method " + tm.getMethodName() + " completed within the time-out " + tm.getTimeOut());
+    }
+    try {
+      boolean flag = future.get();
+      testResult.setStatus(ITestResult.SUCCESS); // if no exception till here then SUCCESS.
+      return flag;
+    } catch (ExecutionException e) {
+      // FutureTask never completes exceptionally without a cause, and the only handler of this
+      // wrapper reads the cause straight back out.
+      throw new ThreadExecutionException(Objects.requireNonNull(e.getCause()));
+    }
+  }
+
+  /**
+   * Builds the message for a {@link ThreadTimeoutException} raised because the worker thread never
+   * even started executing the method within the start-up grace period. This is an infrastructure
+   * problem (system load or thread-pool starvation), not a slow test method, so the message says so
+   * explicitly and points at actionable remedies rather than blaming the user's method.
+   */
+  private static String buildNeverStartedMessage(ITestNGMethod tm, long startupGraceMillis) {
+    return "Method "
+        + tm.getQualifiedName()
+        + "() never started executing within "
+        + startupGraceMillis
+        + "ms: the worker thread could not be scheduled in time. This is most likely caused by "
+        + "system load or thread-pool starvation (e.g. too many parallel tests) rather than a slow "
+        + "test method. Consider reducing the level of parallelism or increasing the thread-pool "
+        + "size.";
+  }
+
+  private static StackTraceElement @Nullable [] getRunningMethodStackTrace(ExecutorService exec) {
+    if (!(exec instanceof ThreadPoolExecutor)) {
+      return null;
+    }
+    ThreadFactory threadFactory = ((ThreadPoolExecutor) exec).getThreadFactory();
+
+    if (!(threadFactory instanceof TestNGThreadFactory)) {
+      return null;
+    }
+    TestNGThreadFactory testNGThreadFactory = (TestNGThreadFactory) threadFactory;
+
+    StackTraceElement[] stackTrace = null;
+    Collection<Thread> threads = testNGThreadFactory.getRunningThreads();
+    if (threads.size() == 1) {
+      stackTrace = threads.iterator().next().getStackTrace();
+    } else if (threads.size() > 1) {
+      Utils.warn("Cannot resolve stacktrace from multiple threads");
+    }
+    return stackTrace;
+  }
+
+  protected static boolean invokeConfigurable(
+      final Object instance,
+      final Object[] parameters,
+      final IConfigurable configurableInstance,
+      final Method thisMethod,
+      final ITestResult testResult)
+      throws Throwable {
+    final AtomicReference<@Nullable Throwable> error = new AtomicReference<>();
+    AtomicBoolean wasCalled = new AtomicBoolean(false);
+
+    IConfigureCallBack callback =
+        new IConfigureCallBack() {
+          @Override
+          public void runConfigurationMethod(ITestResult tr) {
+            try {
+              wasCalled.set(true);
+              invokeMethod(thisMethod, instance, parameters);
+              error.set(null);
+              tr.setThrowable(null);
+            } catch (Throwable t) {
+              error.set(t);
+              tr.setThrowable(t); // make Throwable available to IConfigurable
+            }
+          }
+
+          @Override
+          public Object[] getParameters() {
+            return parameters;
+          }
+        };
+    configurableInstance.run(callback, testResult);
+    Throwable thrown = error.get();
+    if (thrown != null) {
+      throw thrown;
+    }
+    return wasCalled.get();
+  }
+}

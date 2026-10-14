@@ -1,0 +1,23 @@
+package test.privatemethod;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import org.testng.annotations.Test;
+
+public class PrivateMethodTest {
+  public PrivateMethodTest(String name, int value) {}
+
+  private int privateMethod() {
+    return 1;
+  }
+
+  public static class PrivateMethodInnerTest {
+    @Test
+    public void testPrivateMethod() {
+      PrivateMethodTest pmt = new PrivateMethodTest("aname", 1);
+      int returnValue = pmt.privateMethod();
+
+      assertThat(returnValue).isEqualTo(1);
+    }
+  }
+}

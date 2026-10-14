@@ -1,0 +1,222 @@
+package org.testng.reporters.jq;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import org.jspecify.annotations.Nullable;
+import org.testng.IResultMap;
+import org.testng.ISuite;
+import org.testng.ISuiteResult;
+import org.testng.ITestContext;
+import org.testng.ITestNGMethod;
+import org.testng.ITestResult;
+import org.testng.collections.ListMultiMap;
+import org.testng.collections.Maps;
+import org.testng.collections.SetMultiMap;
+import org.testng.internal.reporters.ParameterSnapshots;
+
+public class Model {
+  private final ListMultiMap<ISuite, ITestResult> m_model = Maps.newListMultiMap();
+  private final List<ISuite> m_suites;
+  private final Map<String, String> m_testTags = new HashMap<>();
+  private final Map<ITestResult, String> m_testResultMap = new HashMap<>();
+  private final Map<ISuite, ResultsByClass> m_failedResultsByClass = new HashMap<>();
+  private final Map<ISuite, ResultsByClass> m_skippedResultsByClass = new HashMap<>();
+  private final Map<ISuite, ResultsByClass> m_passedResultsByClass = new HashMap<>();
+  private final List<ITestResult> m_allFailedResults = new ArrayList<>();
+  // Each suite is mapped to failed.png, skipped.png or nothing (which means passed.png)
+  private final Map<String, String> m_statusBySuiteName = new HashMap<>();
+  private final SetMultiMap<String, String> m_groupsBySuiteName = Maps.newSetMultiMap();
+  private final SetMultiMap<String, String> m_methodsByGroup = Maps.newSetMultiMap();
+
+  public Model(List<ISuite> suites) {
+    m_suites = suites;
+    init();
+  }
+
+  public List<ISuite> getSuites() {
+    return m_suites;
+  }
+
+  private void init() {
+    int testCounter = 0;
+    for (ISuite suite : m_suites) {
+      List<ITestResult> passed = new ArrayList<>();
+      List<ITestResult> failed = new ArrayList<>();
+      List<ITestResult> skipped = new ArrayList<>();
+      Map<String, ISuiteResult> suiteResults = suite.getResults();
+      for (ISuiteResult sr : suiteResults.values()) {
+        ITestContext context = sr.getTestContext();
+        m_testTags.put(context.getName(), "test-" + testCounter++);
+        failed.addAll(context.getFailedTests().getAllResults());
+        skipped.addAll(context.getSkippedTests().getAllResults());
+        passed.addAll(context.getPassedTests().getAllResults());
+        IResultMap[] map =
+            new IResultMap[] {
+              context.getFailedTests(), context.getSkippedTests(), context.getPassedTests()
+            };
+        for (IResultMap m : map) {
+          for (ITestResult tr : m.getAllResults()) {
+            m_testResultMap.put(tr, getTestResultName(tr));
+          }
+        }
+      }
+
+      // Process them in the order passed, skipped and failed, so that the failed
+      // icon overrides all the others and the skipped icon overrides passed.
+
+      // Passed
+      {
+        ResultsByClass rbc = new ResultsByClass();
+        for (ITestResult tr : passed) {
+          rbc.addResult(tr.getTestClass().getRealClass(), tr);
+          updateGroups(suite, tr);
+        }
+        m_passedResultsByClass.put(suite, rbc);
+      }
+
+      // Skipped
+      {
+        ResultsByClass rbc = new ResultsByClass();
+        for (ITestResult tr : skipped) {
+          m_statusBySuiteName.put(suite.getName(), "skipped");
+          rbc.addResult(tr.getTestClass().getRealClass(), tr);
+          updateGroups(suite, tr);
+        }
+        m_skippedResultsByClass.put(suite, rbc);
+      }
+
+      // Failed
+      {
+        ResultsByClass rbc = new ResultsByClass();
+        for (ITestResult tr : failed) {
+          m_statusBySuiteName.put(suite.getName(), "failed");
+          rbc.addResult(tr.getTestClass().getRealClass(), tr);
+          m_allFailedResults.add(tr);
+          updateGroups(suite, tr);
+        }
+        m_failedResultsByClass.put(suite, rbc);
+      }
+
+      m_model.putAll(suite, failed);
+      m_model.putAll(suite, skipped);
+      m_model.putAll(suite, passed);
+    }
+  }
+
+  private void updateGroups(ISuite suite, ITestResult tr) {
+    ITestNGMethod method = tr.getMethod();
+    String[] groups = method.getGroups();
+    m_groupsBySuiteName.putAll(suite.getName(), Arrays.asList(groups));
+    for (String group : groups) {
+      m_methodsByGroup.put(group, method.getMethodName());
+    }
+  }
+
+  public ResultsByClass getFailedResultsByClass(ISuite suite) {
+    return resultsByClass(m_failedResultsByClass, suite);
+  }
+
+  public ResultsByClass getSkippedResultsByClass(ISuite suite) {
+    return resultsByClass(m_skippedResultsByClass, suite);
+  }
+
+  public ResultsByClass getPassedResultsByClass(ISuite suite) {
+    return resultsByClass(m_passedResultsByClass, suite);
+  }
+
+  // init() files every suite in all three tables, so a suite the model never saw reads as empty
+  // rather than null -- the way an unknown suite name reads as "passed" in getStatusForSuite.
+  private static ResultsByClass resultsByClass(
+      Map<ISuite, ResultsByClass> resultsBySuite, ISuite suite) {
+    ResultsByClass results = resultsBySuite.get(suite);
+    return results != null ? results : new ResultsByClass();
+  }
+
+  /** @return the anchor tag of a result the model holds, or {@code null} for any other result. */
+  public @Nullable String getTag(ITestResult tr) {
+    return m_testResultMap.get(tr);
+  }
+
+  public List<ITestResult> getTestResults(ISuite suite) {
+    return m_model.get(suite);
+  }
+
+  private static String getMethodName(String name) {
+    if (name == null) {
+      return "";
+    }
+    return name;
+  }
+
+  /**
+   * Names an invocation by the values it ran with, as they were when it started rather than as the
+   * objects stand now. The report is built once every invocation of the run is over, so a data
+   * provider that hands the same mutable row to every invocation, or a test that changes what it
+   * was given, used to leave every one of them named after that value's final state.
+   *
+   * <p>Reached for configuration methods as well as test methods: {@code ChronologicalPanel} names
+   * every invoked method this way, {@code NavigatorPanel} and {@code ReporterPanel} name the test
+   * results, and {@code SuitePanel} uses it as an anchor.
+   */
+  public static String getTestResultName(ITestResult tr) {
+    StringBuilder result = new StringBuilder(getMethodName(tr.getMethod().getMethodName()));
+    List<String> values = ParameterSnapshots.reportedPlainValuesOf(tr);
+    if (!values.isEmpty()) {
+      String joined = String.join(", ", values);
+      result
+          .append("(")
+          .append(joined.length() > 100 ? joined.substring(0, 100) + "..." : joined)
+          .append(")");
+    }
+
+    return result.toString();
+  }
+
+  public List<ITestResult> getAllFailedResults() {
+    return m_allFailedResults;
+  }
+
+  public static String getImage(String tagClass) {
+    return tagClass + ".png";
+  }
+
+  public String getStatusForSuite(String suiteName) {
+    String result = m_statusBySuiteName.get(suiteName);
+    return result != null ? result : "passed";
+  }
+
+  public List<String> getGroups(String name) {
+    List<String> result = new ArrayList<>(m_groupsBySuiteName.get(name));
+    Collections.sort(result);
+    return result;
+  }
+
+  public List<String> getMethodsInGroup(String groupName) {
+    List<String> result = new ArrayList<>(m_methodsByGroup.get(groupName));
+    Collections.sort(result);
+    return result;
+  }
+
+  public List<ITestResult> getAllTestResults(ISuite suite) {
+    return getAllTestResults(suite, true /* tests only */);
+  }
+
+  public List<ITestResult> getAllTestResults(ISuite suite, boolean testsOnly) {
+    List<ITestResult> result = new ArrayList<>();
+    for (ISuiteResult sr : suite.getResults().values()) {
+      result.addAll(sr.getTestContext().getPassedTests().getAllResults());
+      result.addAll(sr.getTestContext().getFailedTests().getAllResults());
+      result.addAll(sr.getTestContext().getSkippedTests().getAllResults());
+      if (!testsOnly) {
+        result.addAll(sr.getTestContext().getPassedConfigurations().getAllResults());
+        result.addAll(sr.getTestContext().getFailedConfigurations().getAllResults());
+        result.addAll(sr.getTestContext().getSkippedConfigurations().getAllResults());
+      }
+    }
+    return result;
+  }
+}

@@ -1,0 +1,151 @@
+# Need help? 
+Before opening a new issue, did you ask your question on
+
+* [Google group](https://groups.google.com/group/testng-users)
+* [StackOverflow](https://stackoverflow.com/questions/tagged/testng)
+
+If you posted on both sites, please provide the link to the other question to avoid duplicating the answer.
+
+# Are you sure it is a TestNG bug?
+Before posting the issue, try to reproduce the issue in [a shell window](https://testng.org/doc/documentation-main.html#running-testng).
+
+If the problem does not exist with the shell, first check if the issue exists on the bugtracker of the runner, and open an issue there first:
+
+* Eclipse: https://github.com/cbeust/testng-eclipse/issues
+* IntelliJ: [https://youtrack.jetbrains.com/issues](https://youtrack.jetbrains.com/issues?q=%23%7BUnit%20Testing.%20TestNG%7D%20)
+* Maven: https://issues.apache.org/jira/browse/SUREFIRE
+* Gradle: https://issues.gradle.org/projects/GRADLE
+
+# Which version are you using?
+Always make sure your issue is happening on the latest TestNG version. Bug reports occurring on older versions will not be looked at quickly.
+
+# Have you considered sending a pull request instead of filing an issue?
+
+The best way to report a bug is to provide the TestNG team with a full test case reproducing the issue.
+Maybe you can write a runnable test case (check the `src/test/` folder for examples) and propose it in a pull request 
+Don't worry if the CI fails because it is the expected behavior.
+This pull request will be a perfect start to find the fix :)
+
+# Issue labels
+
+Issues are classified with prefixed labels: `type:` for the nature of the report, `area:` and
+`runner:` for the affected scope, `status:` for what is currently needed to move it forward, and
+`aspect:`, `platform:`, `contribution:` and `resolution:` for everything else.
+
+Two of them are worth knowing before you start:
+
+* [`contribution: good first issue`](https://github.com/testng-team/testng/labels/contribution%3A%20good%20first%20issue)
+  lists small, well-scoped issues with clear acceptance criteria.
+* [`contribution: help wanted`](https://github.com/testng-team/testng/labels/contribution%3A%20help%20wanted)
+  lists issues that are ready for someone to pick up.
+
+Maintainers: the full taxonomy, the colors, and the rules for adding, renaming, merging, and
+deleting labels are in [LABELS.md](LABELS.md).
+
+# We encourage pull requests that:
+  
+  * Add new features to TestNG (or)
+  * Fix bugs in TestNG
+  
+  If your pull request involves fixing SonarQube issues then we would suggest that you please discuss this with the 
+  [TestNG-dev](https://groups.google.com/forum/#!forum/testng-dev) before you spend time working on it.
+
+## Working with the codebase
+
+### JDK Requirements
+
+**Important:** TestNG is built with **JDK 25**, but the compiled artifacts target **Java 11**.
+
+- **For users**: TestNG can run on Java 11 or higher
+- **For contributors**: you need JDK 25 installed to build TestNG
+
+This is because:
+1. The Gradle build toolchain uses JDK 25 (`jdkBuildVersion=25` in `gradle.properties`)
+2. The publishing plugins (nmcp) require Java 17+
+3. The compiled bytecode targets Java 11 (`targetJavaVersion=11` in `gradle.properties`)
+
+To check your Java version, run:
+```bash
+java -version
+```
+
+If you need to install JDK 25, we recommend using [mise](https://mise.jdx.dev/), [SDKMAN!](https://sdkman.io/) or downloading from [Adoptium](https://adoptium.net/).
+
+### List all tasks
+
+After cloning the project, run `./gradlew tasks` to list out all the tasks that are available.
+
+### Importing into IntelliJ
+
+To import the TestNG project into IntelliJ run `./gradlew openIdea`
+
+### Running all tests
+
+To run all the test cases (build the code) run `./gradlew test`
+
+### Running tests that belong to a specific module
+
+* First list the sub-modules that are available in the TestNG codebase by running `./gradlew projects`
+* Now you can run tests that belong to any specific module by running `./gradlew :<moduleNameGoesHere>:test`. For e.g., to run tests under the sub-module **testng-asserts** run the command : `./gradlew :testng-asserts:test`
+
+The codebase makes use of [autostyle](https://github.com/autostyle/autostyle) to enforce code formatting and also fixing code formatting.
+
+To check if there are any code formatting/styling issues (it's best to run this before every pull request), run `./gradlew autostyleCheck`
+
+To automatically fix any styling issues run `./gradlew autostyleApply`
+
+**Tip:**
+
+In order to automatically have the formatting applied as and when you commit code, you can do the following:
+
+1. Create a new file under `.git/hooks/pre-commit`
+2. Now add the below contents to this file and save it.
+
+```
+# run the auto style applying on the code
+./gradlew autostyleApply
+
+# store the last exit code in a variable
+RESULT=$?
+
+# return the './gradlew autostyleApply' exit code
+exit $RESULT
+```
+
+This will cause git to trigger the code styling automatically right before commiting your changes locally.
+
+After that you can quickly check if there were any formatting that was applied using `git status`
+
+### Automated refactoring with OpenRewrite
+
+The codebase makes use of [OpenRewrite](https://docs.openrewrite.org/) for automated refactoring.
+It is a maintenance tool you run on purpose; it is never part of `check` or `build`, so a normal
+build never invokes it.
+
+To see what the recipes would change without touching your working tree, run
+`./gradlew rewriteDryRun`. It writes a patch to `build/reports/rewrite/rewrite.patch`. **Read that
+patch before applying it** -- recipes are not always semantics-preserving, and at least one had to
+be dropped from our list because it silently broke a `NaN` comparison.
+
+To apply the recipes run `./gradlew rewriteRun`, and then **always** run `./gradlew autostyleApply`
+afterwards, as two separate commands:
+
+```bash
+./gradlew rewriteRun
+./gradlew autostyleApply
+```
+
+OpenRewrite does not emit google-java-format output, so Autostyle has to have the last word or
+`autostyleCheck` will fail. Do not combine the two into a single Gradle invocation: task ordering
+between them is not constrained and Gradle may interleave them.
+
+CI runs `./gradlew rewriteDryRun -PfailOnRewriteDryRun=true`, which fails when the recipes still
+have work to do. That exact command reproduces the check locally.
+
+The active recipes are listed in [`rewrite.yml`](../rewrite.yml) at the root of the repository. It
+is a hand-picked list rather than one of OpenRewrite's bundled composite recipes; the file explains
+why. If you want to add a recipe, add it there and include the dry-run patch in your pull request.
+
+**Note:** the OpenRewrite tasks are not compatible with Gradle's configuration cache
+([rewrite-gradle-plugin#366](https://github.com/openrewrite/rewrite-gradle-plugin/issues/366)). If
+you have it enabled, add `--no-configuration-cache` to the commands above.

@@ -1,0 +1,712 @@
+package org.testng.xml;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.regex.Pattern;
+import org.jspecify.annotations.Nullable;
+import org.testng.TestNGException;
+
+/** This class describes the tag &lt;test&gt; in testng.xml. */
+public class XmlTest implements Cloneable {
+
+  public static final int DEFAULT_TIMEOUT_MS = Integer.MAX_VALUE;
+
+  private @Nullable XmlSuite m_suite;
+
+  /**
+   * No two tests in the same suite should have the same name, so the default is unique. Set on the
+   * field rather than in {@link #init(XmlSuite, int)} so that every construction path carries a
+   * name, including the no-argument constructor the YAML parser builds tests through.
+   */
+  private String m_name = "Default XmlTest name " + UUID.randomUUID();
+
+  private Integer m_verbose = XmlSuite.DEFAULT_VERBOSE;
+  private int m_threadCount = -1;
+
+  private List<XmlClass> m_xmlClasses = new ArrayList<>();
+
+  private Map<String, String> m_parameters = new HashMap<>();
+  private XmlSuite.@Nullable ParallelMode m_parallel;
+
+  private List<XmlMethodSelector> m_methodSelectors = new ArrayList<>();
+  // test level packages
+  private List<XmlPackage> m_xmlPackages = new ArrayList<>();
+
+  private @Nullable String m_timeOut;
+  private Boolean m_skipFailedInvocationCounts = XmlSuite.DEFAULT_SKIP_FAILED_INVOCATION_COUNTS;
+  private @Nullable Map<String, List<Integer>> m_failedInvocationNumbers; // lazily initialized
+
+  private Boolean m_preserveOrder = XmlSuite.DEFAULT_PRESERVE_ORDER;
+
+  private int m_index;
+
+  private @Nullable Boolean m_groupByInstances;
+
+  private @Nullable Boolean m_allowReturnValues;
+
+  private Map<String, String> m_xmlDependencyGroups = new HashMap<>();
+
+  /**
+   * Constructs a <code>XmlTest</code> and adds it to suite's list of tests.
+   *
+   * @param suite the parent suite.
+   * @param index the index of this test tag in testng.xml
+   */
+  public XmlTest(XmlSuite suite, int index) {
+    init(suite, index);
+  }
+
+  public XmlTest(XmlSuite suite) {
+    init(suite, 0);
+  }
+
+  private void init(XmlSuite suite, int index) {
+    m_suite = suite;
+    m_suite.getTests().add(this);
+    m_index = index;
+  }
+
+  // For YAML
+  public XmlTest() {}
+
+  public void setXmlPackages(List<XmlPackage> packages) {
+    m_xmlPackages = new ArrayList<>(packages);
+  }
+
+  public List<XmlPackage> getXmlPackages() {
+    return m_xmlPackages;
+  }
+
+  // For YAML
+  public List<XmlPackage> getPackages() {
+    return getXmlPackages();
+  }
+
+  // For YAML
+  public void setPackages(List<XmlPackage> p) {
+    setXmlPackages(p);
+  }
+
+  public List<XmlMethodSelector> getMethodSelectors() {
+    return m_methodSelectors;
+  }
+
+  public void setMethodSelectors(List<XmlMethodSelector> methodSelectors) {
+    m_methodSelectors = new ArrayList<>(methodSelectors);
+  }
+
+  /**
+   * Returns the suite this test is part of.
+   *
+   * @return the suite this test is part of.
+   */
+  public final XmlSuite getSuite() {
+    if (m_suite == null) {
+      throw new IllegalStateException(
+          "Current [XmlTest] object is not associated with any [XmlSuite] yet.");
+    }
+    return m_suite;
+  }
+
+  /** @return the includedGroups. */
+  public List<String> getIncludedGroups() {
+    List<String> result = new ArrayList<>();
+    if (m_xmlGroups != null && m_xmlGroups.getRun() != null) {
+      result.addAll(m_xmlGroups.getRun().getIncludes());
+    }
+    result.addAll(getSuite().getIncludedGroups());
+    return Collections.unmodifiableList(result);
+  }
+
+  public boolean isGroupFilteringDisabled() {
+    return getIncludedGroups().isEmpty() && getExcludedGroups().isEmpty();
+  }
+
+  /** @return Returns the classes. */
+  public List<XmlClass> getXmlClasses() {
+    return m_xmlClasses;
+  }
+
+  // For YAML
+  public List<XmlClass> getClasses() {
+    return getXmlClasses();
+  }
+
+  // For YAML
+  public void setClasses(List<XmlClass> c) {
+    setXmlClasses(c);
+  }
+
+  /**
+   * Sets the XML Classes.
+   *
+   * @param classes The classes to set.
+   */
+  public void setXmlClasses(List<XmlClass> classes) {
+    m_xmlClasses = classes;
+  }
+
+  /** @return Returns the name. */
+  public String getName() {
+    return m_name;
+  }
+
+  /** @param name The name to set. */
+  public void setName(String name) {
+    // The YAML reader drives this setter, and a "name:" key with no value hands it null, which
+    // would defeat the default the field initialiser guarantees. The XML reader already rejects
+    // that document outright.
+    m_name = Objects.requireNonNull(name, "a <test> tag carries a name");
+  }
+
+  /** @param v - Verbosity level. */
+  public void setVerbose(int v) {
+    m_verbose = v;
+  }
+
+  public int getThreadCount() {
+    return m_threadCount > 0 ? m_threadCount : getSuite().getThreadCount();
+  }
+
+  public void setThreadCount(int threadCount) {
+    m_threadCount = threadCount;
+  }
+
+  /** Creates the {@code <groups>} and {@code <run>} pair on first use, and returns the run. */
+  private XmlRun groupsRun() {
+    XmlGroups groups = groups();
+    XmlRun run = groups.getRun();
+    if (run == null) {
+      run = new XmlRun();
+      groups.setRun(run);
+    }
+    return run;
+  }
+
+  /** Creates the {@code <groups>} element on first use, and returns it. */
+  private XmlGroups groups() {
+    XmlGroups groups = m_xmlGroups;
+    if (groups == null) {
+      groups = new XmlGroups();
+      m_xmlGroups = groups;
+    }
+    return groups;
+  }
+
+  public void setIncludedGroups(List<String> g) {
+    List<String> includes = groupsRun().getIncludes();
+    includes.clear();
+    includes.addAll(g);
+  }
+
+  public void setExcludedGroups(List<String> g) {
+    List<String> excludes = groupsRun().getExcludes();
+    excludes.clear();
+    excludes.addAll(g);
+  }
+
+  public List<String> getExcludedGroups() {
+    List<String> result = new ArrayList<>();
+    if (m_xmlGroups != null && m_xmlGroups.getRun() != null) {
+      result.addAll(m_xmlGroups.getRun().getExcludes());
+    }
+    result.addAll(getSuite().getExcludedGroups());
+    return Collections.unmodifiableList(result);
+  }
+
+  public void addIncludedGroup(String g) {
+    groupsRun().onInclude(g);
+  }
+
+  public void addExcludedGroup(String g) {
+    groupsRun().onExclude(g);
+  }
+
+  /** @return Returns the verbose. */
+  public int getVerbose() {
+    Integer result = m_verbose;
+    if (null == result || XmlSuite.DEFAULT_VERBOSE.equals(m_verbose)) {
+      result = getSuite().getVerbose();
+    }
+
+    return Optional.ofNullable(result).orElse(1);
+  }
+
+  public boolean getGroupByInstances() {
+    Boolean result = m_groupByInstances;
+    if (result == null || XmlSuite.DEFAULT_GROUP_BY_INSTANCES.equals(m_groupByInstances)) {
+      result = getSuite().getGroupByInstances();
+    }
+
+    return Optional.ofNullable(result).orElse(XmlSuite.DEFAULT_GROUP_BY_INSTANCES);
+  }
+
+  public void setGroupByInstances(boolean f) {
+    m_groupByInstances = f;
+  }
+
+  public void setSkipFailedInvocationCounts(boolean skip) {
+    m_skipFailedInvocationCounts = skip;
+  }
+
+  /** @return Returns whether failed invocation counts should be skipped. */
+  public boolean skipFailedInvocationCounts() {
+    Boolean result = m_skipFailedInvocationCounts;
+    if (null == result) {
+      result = getSuite().skipFailedInvocationCounts();
+    }
+
+    return result;
+  }
+
+  public void addMetaGroup(String name, List<String> metaGroup) {
+    XmlDefine define = new XmlDefine();
+    define.setName(name);
+    define.getIncludes().addAll(metaGroup);
+    groups().getDefines().add(define);
+  }
+
+  public void addMetaGroup(String name, String... metaGroup) {
+    addMetaGroup(name, Arrays.asList(metaGroup));
+  }
+
+  // For YAML
+  public void setMetaGroups(Map<String, List<String>> metaGroups) {
+    for (Map.Entry<String, List<String>> entry : metaGroups.entrySet()) {
+      addMetaGroup(entry.getKey(), entry.getValue());
+    }
+  }
+
+  /** @return Returns the metaGroups. */
+  public Map<String, List<String>> getMetaGroups() {
+    Map<String, List<String>> result = new HashMap<>();
+    if (m_xmlGroups != null) {
+      for (XmlDefine xd : m_xmlGroups.getDefines()) {
+        result.put(xd.getName(), xd.getIncludes());
+      }
+    }
+    return result;
+  }
+
+  /** @param parameters - A {@link Map} of parameters. */
+  public void setParameters(Map<String, String> parameters) {
+    m_parameters = parameters;
+  }
+
+  public void addParameter(String key, String value) {
+    m_parameters.put(key, value);
+  }
+
+  public @Nullable String getParameter(String name) {
+    String result = m_parameters.get(name);
+    if (null == result) {
+      result = getSuite().getParameter(name);
+    }
+
+    return result;
+  }
+
+  /** @return the parameters defined in this test tag and the tags above it. */
+  public Map<String, String> getAllParameters() {
+    Map<String, String> result = new HashMap<>();
+    result.putAll(getSuite().getParameters());
+    result.putAll(m_parameters);
+    return result;
+  }
+
+  /**
+   * @return the parameters defined in this tag, and only this test tag. To retrieve the inherited
+   *     parameters as well, call {@code getAllParameters()}.
+   */
+  public Map<String, String> getLocalParameters() {
+    return m_parameters;
+  }
+
+  public void setParallel(XmlSuite.ParallelMode parallel) {
+    m_parallel = parallel;
+  }
+
+  public XmlSuite.ParallelMode getParallel() {
+    return Optional.ofNullable(m_parallel).orElse(getSuite().getParallel());
+  }
+
+  public @Nullable String getTimeOut() {
+    String result = getSuite().getTimeOut();
+    if (null != m_timeOut) {
+      result = m_timeOut;
+    }
+
+    return result;
+  }
+
+  public long getTimeOut(long def) {
+    long result = def;
+    if (getTimeOut() != null) {
+      result = Long.parseLong(getTimeOut());
+    }
+
+    return result;
+  }
+
+  public void setTimeOut(long timeOut) {
+    m_timeOut = Long.toString(timeOut);
+  }
+
+  private void setTimeOut(@Nullable String timeOut) {
+    m_timeOut = timeOut;
+  }
+
+  public void setScript(@Nullable XmlScript script) {
+    List<XmlMethodSelector> selectors = getMethodSelectors();
+    if (!selectors.isEmpty()) {
+      XmlMethodSelector xms = selectors.get(0);
+      xms.setScript(script);
+    } else if (script != null) {
+      XmlMethodSelector xms = new XmlMethodSelector();
+      selectors.add(xms);
+      xms.setScript(script);
+    }
+  }
+
+  /** @return the script of the first method selector, or {@code null} if none carries one. */
+  public @Nullable XmlScript getScript() {
+    List<XmlMethodSelector> selectors = getMethodSelectors();
+    if (selectors.isEmpty()) {
+      return null;
+    }
+    return selectors.get(0).getScript();
+  }
+
+  public String toXml(String indent) {
+    return XmlWeaver.asXml(this, indent);
+  }
+
+  /**
+   * Clone the <code>source</code> <code>XmlTest</code> by including: - test attributes - groups
+   * definitions - parameters
+   *
+   * <p>The &lt;classes&gt; sub element is ignored for the moment.
+   *
+   * @return a clone of the current XmlTest
+   */
+  @Override
+  public Object clone() {
+    XmlTest result = new XmlTest(getSuite());
+
+    result.setName(getName());
+    result.setIncludedGroups(getIncludedGroups());
+    result.setExcludedGroups(getExcludedGroups());
+    result.setParallel(getParallel());
+    result.setThreadCount(getThreadCount());
+    result.setVerbose(getVerbose());
+    Map<String, String> localParameters = new HashMap<>(getLocalParameters());
+    result.setParameters(localParameters);
+    result.setXmlPackages(getXmlPackages());
+    result.setTimeOut(getTimeOut());
+    result.setXmlClasses(getXmlClasses());
+
+    Map<String, List<String>> metagroups = getMetaGroups();
+    for (Map.Entry<String, List<String>> group : metagroups.entrySet()) {
+      result.addMetaGroup(group.getKey(), group.getValue());
+    }
+
+    return result;
+  }
+
+  /**
+   * Convenience method to cache the ordering numbers for methods.
+   *
+   * @param method The method name
+   * @return The invocation numbers of the method, or an empty list when it declares none.
+   *     <p><b>The empty answer is immutable</b>, where it used to be a fresh {@link ArrayList} the
+   *     caller was free to add to. A caller that means to build on what it gets back has to copy it
+   *     first. Nothing in TestNG did, and the fresh list was allocated for every method of every
+   *     &#64;Factory instance only to be thrown away, which is why it is shared now.
+   */
+  public List<Integer> getInvocationNumbers(String method) {
+    Map<String, List<Integer>> cached = m_failedInvocationNumbers;
+    if (cached == null) {
+      cached = new HashMap<>();
+      m_failedInvocationNumbers = cached;
+      for (XmlClass c : getXmlClasses()) {
+        for (XmlInclude xi : c.getIncludedMethods()) {
+          List<Integer> invocationNumbers = xi.getInvocationNumbers();
+          if (!invocationNumbers.isEmpty()) {
+            String methodName = c.getName() + "." + xi.getName();
+            cached.put(methodName, invocationNumbers);
+          }
+        }
+      }
+    }
+
+    // Empty for all but the <include invocation-numbers="..."> methods, and every test method of
+    // every @Factory instance asks once - so hand back a shared empty list instead of a throwaway
+    // one that the caller then holds on to for the length of the run.
+    List<Integer> numbers = cached.get(method);
+    return numbers != null ? numbers : Collections.emptyList();
+  }
+
+  public void setPreserveOrder(Boolean preserveOrder) {
+    m_preserveOrder = preserveOrder;
+  }
+
+  public Boolean getPreserveOrder() {
+    if (m_preserveOrder == null) {
+      return getSuite().getPreserveOrder();
+    }
+
+    return m_preserveOrder;
+  }
+
+  public void setSuite(XmlSuite result) {
+    m_suite = result;
+  }
+
+  public Boolean getAllowReturnValues() {
+    if (m_allowReturnValues != null) {
+      return m_allowReturnValues;
+    } else {
+      return getSuite().getAllowReturnValues();
+    }
+  }
+
+  public void setAllowReturnValues(Boolean allowReturnValues) {
+    m_allowReturnValues = allowReturnValues;
+  }
+
+  /**
+   * Note that this attribute does not come from the XML file, it's calculated internally and
+   * represents the order in which this test tag was found in its &lt;suite&gt; tag. It's used to
+   * calculate the ordering of the tests when preserve-test-order is true.
+   *
+   * @return The value
+   */
+  public int getIndex() {
+    return m_index;
+  }
+
+  public void setIndex(int index) {
+    m_index = index;
+  }
+
+  @Override
+  public int hashCode() {
+    final int prime = 31;
+    int result = 1;
+    result =
+        prime * result
+            + (m_xmlGroups == null || m_xmlGroups.getRun() == null
+                ? 0
+                : m_xmlGroups.getRun().getExcludes().hashCode());
+    result =
+        prime * result
+            + (m_failedInvocationNumbers == null ? 0 : m_failedInvocationNumbers.hashCode());
+    result =
+        prime * result
+            + (m_xmlGroups == null || m_xmlGroups.getRun() == null
+                ? 0
+                : m_xmlGroups.getRun().getIncludes().hashCode());
+    result = prime * result + (m_xmlGroups == null ? 0 : m_xmlGroups.getDefines().hashCode());
+    result = prime * result + (m_methodSelectors == null ? 0 : m_methodSelectors.hashCode());
+    result = prime * result + m_name.hashCode();
+    result = prime * result + (m_parallel == null ? 0 : m_parallel.hashCode());
+    result = prime * result + (m_parameters == null ? 0 : m_parameters.hashCode());
+    result = prime * result + (m_preserveOrder == null ? 0 : m_preserveOrder.hashCode());
+    result =
+        prime * result
+            + (m_skipFailedInvocationCounts == null ? 0 : m_skipFailedInvocationCounts.hashCode());
+    result = prime * result + m_threadCount;
+    result = prime * result + (m_timeOut == null ? 0 : m_timeOut.hashCode());
+    result = prime * result + (m_verbose == null ? 0 : m_verbose.hashCode());
+    result = prime * result + (m_xmlClasses == null ? 0 : m_xmlClasses.hashCode());
+    return prime * result + (m_xmlPackages == null ? 0 : m_xmlPackages.hashCode());
+  }
+
+  @Override
+  @SuppressWarnings("EqualsGetClass") // published, subclassable value type; see package-info
+  public boolean equals(Object obj) {
+    if (this == obj) {
+      return true;
+    }
+    if (obj == null) {
+      return XmlSuite.f();
+    }
+    if (getClass() != obj.getClass()) {
+      return XmlSuite.f();
+    }
+    XmlTest other = (XmlTest) obj;
+    if (m_xmlGroups == null) {
+      if (other.m_xmlGroups != null) {
+        return XmlSuite.f();
+      }
+    } else {
+      XmlGroups otherGroups = other.m_xmlGroups;
+      if (otherGroups == null) {
+        return false;
+      }
+      XmlRun run = m_xmlGroups.getRun();
+      XmlRun otherRun = otherGroups.getRun();
+      if (run == null) {
+        if (otherRun != null) {
+          return XmlSuite.f();
+        }
+      } else if (otherRun == null) {
+        return XmlSuite.f();
+      } else {
+        if (!run.getExcludes().equals(otherRun.getExcludes())) {
+          return XmlSuite.f();
+        }
+        if (!run.getIncludes().equals(otherRun.getIncludes())) {
+          return XmlSuite.f();
+        }
+      }
+      if (!m_xmlGroups.getDefines().equals(otherGroups.getDefines())) {
+        return false;
+      }
+    }
+    if (m_failedInvocationNumbers == null) {
+      if (other.m_failedInvocationNumbers != null) {
+        return XmlSuite.f();
+      }
+    } else if (!m_failedInvocationNumbers.equals(other.m_failedInvocationNumbers)) {
+      return XmlSuite.f();
+    }
+    if (m_methodSelectors == null) {
+      if (other.m_methodSelectors != null) {
+        return XmlSuite.f();
+      }
+    } else if (!m_methodSelectors.equals(other.m_methodSelectors)) {
+      return XmlSuite.f();
+    }
+    if (!m_name.equals(other.m_name)) {
+      return XmlSuite.f();
+    }
+    if (m_parallel == null) {
+      if (other.m_parallel != null) {
+        return XmlSuite.f();
+      }
+    } else if (!m_parallel.equals(other.m_parallel)) {
+      return XmlSuite.f();
+    }
+    if (m_parameters == null) {
+      if (other.m_parameters != null) {
+        return XmlSuite.f();
+      }
+    } else if (!m_parameters.equals(other.m_parameters)) {
+      return XmlSuite.f();
+    }
+    if (m_preserveOrder == null) {
+      if (other.m_preserveOrder != null) {
+        return XmlSuite.f();
+      }
+    } else if (!m_preserveOrder.equals(other.m_preserveOrder)) {
+      return XmlSuite.f();
+    }
+    if (m_skipFailedInvocationCounts == null) {
+      if (other.m_skipFailedInvocationCounts != null) {
+        return XmlSuite.f();
+      }
+    } else if (!m_skipFailedInvocationCounts.equals(other.m_skipFailedInvocationCounts)) {
+      return XmlSuite.f();
+    }
+    if (m_threadCount != other.m_threadCount) {
+      return XmlSuite.f();
+    }
+    if (m_timeOut == null) {
+      if (other.m_timeOut != null) {
+        return XmlSuite.f();
+      }
+    } else if (!m_timeOut.equals(other.m_timeOut)) {
+      return XmlSuite.f();
+    }
+    if (m_verbose == null) {
+      if (other.m_verbose != null) {
+        return XmlSuite.f();
+      }
+    } else if (!m_verbose.equals(other.m_verbose)) {
+      return XmlSuite.f();
+    }
+    if (m_xmlClasses == null) {
+      if (other.m_xmlClasses != null) {
+        return XmlSuite.f();
+      }
+    } else if (!m_xmlClasses.equals(other.m_xmlClasses)) {
+      return XmlSuite.f();
+    }
+    if (m_xmlPackages == null) {
+      if (other.m_xmlPackages != null) {
+        return XmlSuite.f();
+      }
+    } else if (!m_xmlPackages.equals(other.m_xmlPackages)) {
+      return XmlSuite.f();
+    }
+
+    return true;
+  }
+
+  public void addXmlDependencyGroup(String group, String dependsOn) {
+    if (!m_xmlDependencyGroups.containsKey(group)) {
+      m_xmlDependencyGroups.put(group, dependsOn);
+    } else {
+      throw new TestNGException(
+          "Duplicate group dependency found for group \""
+              + group
+              + "\""
+              + ", use a space-separated list of groups in the \"depends-on\" attribute");
+    }
+  }
+
+  public Map<String, String> getXmlDependencyGroups() {
+    Map<String, String> result = m_xmlDependencyGroups;
+    if (m_xmlGroups != null) {
+      List<XmlDependencies> deps = m_xmlGroups.getDependencies();
+      for (XmlDependencies d : deps) {
+        result.putAll(d.getDependencies());
+      }
+    }
+    return result;
+  }
+
+  // For YAML
+  public void setXmlDependencyGroups(Map<String, String> xmlDependencyGroups) {
+    this.m_xmlDependencyGroups = xmlDependencyGroups;
+  }
+
+  public void setXmlSuite(XmlSuite suite) {
+    m_suite = suite;
+  }
+
+  private @Nullable XmlGroups m_xmlGroups;
+
+  public void setGroups(XmlGroups xmlGroups) {
+    m_xmlGroups = xmlGroups;
+  }
+
+  public @Nullable XmlGroups getXmlGroups() {
+    return m_xmlGroups;
+  }
+
+  /**
+   * @param names The list of names to check.
+   * @return <code>true</code> if the current test's name matches with any of the given names.
+   */
+  public boolean nameMatchesAny(List<String> names) {
+    return names.contains(getName())
+        || names.stream()
+            .anyMatch(
+                regex -> {
+                  if (regex.startsWith("/") && regex.endsWith("/")) {
+                    String trimmedRegex = regex.substring(1, regex.length() - 1);
+                    return Pattern.matches(trimmedRegex, getName());
+                  }
+                  return false;
+                });
+  }
+}

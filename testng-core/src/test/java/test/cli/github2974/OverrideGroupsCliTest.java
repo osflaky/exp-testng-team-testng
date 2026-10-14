@@ -1,0 +1,47 @@
+package test.cli.github2974;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.util.ArrayList;
+import java.util.List;
+import org.testng.ITestListener;
+import org.testng.ITestResult;
+import org.testng.TestNG;
+import org.testng.annotations.Test;
+import test.SimpleBaseTest;
+
+public class OverrideGroupsCliTest extends SimpleBaseTest {
+
+  private static class NameCollector implements ITestListener {
+    List<String> names = new ArrayList<>();
+
+    @Override
+    public void onTestSuccess(ITestResult result) {
+      names.add(result.getName());
+    }
+  }
+
+  @Test(description = "GITHUB-2974")
+  public void overrideIncludeGroupsFromCliInParentChildXml() {
+    TestNG testNG = create();
+    testNG.setGroups("override_group");
+    testNG.setTestSuites(List.of(getPathToResource("2974/parent_include.xml")));
+    NameCollector collector = new NameCollector();
+    testNG.addListener(collector);
+    testNG.run();
+    assertThat(collector.names.contains("overrideTest")).isTrue();
+    assertThat(collector.names.contains("defaultTest")).isFalse();
+  }
+
+  @Test(description = "GITHUB-2974")
+  public void overrideExcludeGroupsFromCliInParentChildXml() {
+    TestNG testNG = create();
+    testNG.setExcludedGroups("override_group");
+    testNG.setTestSuites(List.of(getPathToResource("2974/parent_exclude.xml")));
+    NameCollector collector = new NameCollector();
+    testNG.addListener(collector);
+    testNG.run();
+    assertThat(collector.names.contains("defaultTest")).isTrue();
+    assertThat(collector.names.contains("overrideTest")).isFalse();
+  }
+}

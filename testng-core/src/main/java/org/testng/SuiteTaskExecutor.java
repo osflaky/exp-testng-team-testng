@@ -1,0 +1,83 @@
+package org.testng;
+
+import java.util.Objects;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
+import org.jspecify.annotations.Nullable;
+import org.testng.internal.IConfiguration;
+import org.testng.internal.Utils;
+import org.testng.internal.thread.TestNGThreadFactory;
+import org.testng.internal.thread.graph.GraphOrchestrator;
+import org.testng.log4testng.Logger;
+import org.testng.thread.IThreadWorkerFactory;
+
+class SuiteTaskExecutor {
+  private final BlockingQueue<Runnable> queue;
+  private final IDynamicGraph<ISuite> graph;
+  private final IThreadWorkerFactory<ISuite> factory;
+  private final IConfiguration configuration;
+
+  private final int threadPoolSize;
+
+  private @Nullable ExecutorService service;
+  private @Nullable GraphOrchestrator<ISuite> orchestrator;
+
+  private static final Logger LOGGER = Logger.getLogger(SuiteTaskExecutor.class);
+
+  public SuiteTaskExecutor(
+      IConfiguration configuration,
+      IThreadWorkerFactory<ISuite> factory,
+      BlockingQueue<Runnable> queue,
+      IDynamicGraph<ISuite> graph,
+      int threadPoolSize) {
+    this.configuration = configuration;
+    this.factory = factory;
+    this.queue = queue;
+    this.graph = graph;
+    this.threadPoolSize = threadPoolSize;
+  }
+
+  public void execute() {
+    String name = "suites-";
+    service =
+        this.configuration
+            .getExecutorServiceFactory()
+            .create(
+                threadPoolSize,
+                threadPoolSize,
+                Integer.MAX_VALUE,
+                TimeUnit.MILLISECONDS,
+                queue,
+                new TestNGThreadFactory(name));
+    orchestrator = new GraphOrchestrator<>(service, factory, graph, null);
+    orchestrator.run();
+  }
+
+  public void awaitCompletion() {
+    Utils.log("TestNG", 2, "Starting executor for all suites");
+    try {
+      ExecutorService running = Objects.requireNonNull(service, "execute() has started the pool");
+      boolean ignored = running.awaitTermination(Long.MAX_VALUE, TimeUnit.MILLISECONDS);
+      running.shutdownNow();
+    } catch (InterruptedException handled) {
+      Thread.currentThread().interrupt();
+      LOGGER.error(handled.getMessage(), handled);
+    }
+    reportWorkerFailures();
+  }
+
+  /**
+   * A worker that ended on an exception -- typically because a listener threw -- is still marked
+   * finished so the graph can move on, so nothing downstream of the orchestrator can tell it apart
+   * from a clean one. Saying so here is what keeps the cause out of a debugger. See GITHUB-3243.
+   */
+  private void reportWorkerFailures() {
+    if (orchestrator == null) {
+      return;
+    }
+    for (Throwable failure : orchestrator.getFailures()) {
+      LOGGER.error("A suite worker ended on an exception", failure);
+    }
+  }
+}

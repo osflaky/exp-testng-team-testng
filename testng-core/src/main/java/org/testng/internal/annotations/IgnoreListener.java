@@ -1,0 +1,90 @@
+package org.testng.internal.annotations;
+
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Method;
+import java.util.Arrays;
+import org.jspecify.annotations.Nullable;
+import org.testng.annotations.ITestAnnotation;
+import org.testng.annotations.Ignore;
+import org.testng.internal.Utils;
+import org.testng.internal.reflect.ReflectionHelper;
+
+public class IgnoreListener implements IAnnotationTransformer {
+
+  @Override
+  public void transform(
+      ITestAnnotation annotation,
+      @Nullable Class testClass,
+      @Nullable Constructor testConstructor,
+      @Nullable Method testMethod) {
+    transform(annotation, testClass, testConstructor, testMethod, null);
+  }
+
+  @Override
+  public void transform(
+      ITestAnnotation annotation,
+      @Nullable Class testClass,
+      @Nullable Constructor tc,
+      @Nullable Method testMethod,
+      @Nullable Class<?> clazz) {
+    if (!annotation.getEnabled()) {
+      return;
+    }
+    Class<?> typedTestClass = testClass;
+    if (testMethod != null) {
+      ignoreTest(annotation, testMethod.getAnnotation(Ignore.class));
+      typedTestClass = testMethod.getDeclaringClass();
+    }
+    ignoreTestAtClass(typedTestClass, annotation);
+    ignoreTestAtClass(clazz, annotation);
+  }
+
+  private static void ignoreTestAtClass(@Nullable Class<?> clazz, ITestAnnotation annotation) {
+    if (clazz != null) {
+      ignoreTest(annotation, ReflectionHelper.findAnnotation(clazz, Ignore.class));
+      Package testPackage = clazz.getPackage();
+      if (testPackage != null) {
+        ignoreTest(annotation, findAnnotation(testPackage));
+      }
+    }
+  }
+
+  private static void ignoreTest(ITestAnnotation annotation, @Nullable Ignore ignore) {
+    if (ignore == null) {
+      return;
+    }
+    annotation.setEnabled(false);
+    updateDescription(annotation, ignore);
+  }
+
+  private static void updateDescription(ITestAnnotation annotation, Ignore ignore) {
+    if (ignore.value().isEmpty()) {
+      return;
+    }
+    String ignoredDescription;
+    if (annotation.getDescription() == null || annotation.getDescription().isEmpty()) {
+      ignoredDescription = ignore.value();
+    } else {
+      ignoredDescription = ignore.value() + ": " + annotation.getDescription();
+    }
+    annotation.setDescription(ignoredDescription);
+  }
+
+  @SuppressWarnings("deprecation")
+  private static @Nullable Ignore findAnnotation(@Nullable Package testPackage) {
+    if (testPackage == null) {
+      return null;
+    }
+    Ignore result = testPackage.getAnnotation(Ignore.class);
+    if (result != null) {
+      return result;
+    }
+    String[] parts = Utils.splitOnLiteral(testPackage.getName(), ".");
+    String[] parentParts = Arrays.copyOf(parts, parts.length - 1);
+    String parentPackageName = String.join(".", parentParts);
+    if (parentPackageName.isEmpty()) {
+      return null;
+    }
+    return findAnnotation(Package.getPackage(parentPackageName));
+  }
+}

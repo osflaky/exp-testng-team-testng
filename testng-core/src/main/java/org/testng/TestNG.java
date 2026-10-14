@@ -1,0 +1,2227 @@
+package org.testng;
+
+import static org.testng.ListenerComparator.sort;
+import static org.testng.internal.Utils.defaultIfStringEmpty;
+import static org.testng.internal.Utils.isStringEmpty;
+import static org.testng.internal.Utils.isStringNotEmpty;
+
+import java.io.File;
+import java.io.IOException;
+import java.net.URLClassLoader;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.ServiceLoader;
+import java.util.Set;
+import java.util.concurrent.LinkedBlockingQueue;
+import org.jspecify.annotations.Nullable;
+import org.testng.SuiteRunner.TestListenersContainer;
+import org.testng.annotations.ITestAnnotation;
+import org.testng.internal.ClassHelper;
+import org.testng.internal.Configuration;
+import org.testng.internal.DynamicGraph;
+import org.testng.internal.ExitCode;
+import org.testng.internal.IConfiguration;
+import org.testng.internal.ListenerOrderDeterminer;
+import org.testng.internal.MethodSorting;
+import org.testng.internal.ObjectBag;
+import org.testng.internal.OverrideProcessor;
+import org.testng.internal.ReporterConfig;
+import org.testng.internal.RuntimeBehavior;
+import org.testng.internal.Utils;
+import org.testng.internal.Version;
+import org.testng.internal.annotations.DefaultAnnotationTransformer;
+import org.testng.internal.annotations.IAnnotationFinder;
+import org.testng.internal.annotations.JDK15AnnotationFinder;
+import org.testng.internal.invokers.SuiteRunnerMap;
+import org.testng.internal.invokers.objects.GuiceContext;
+import org.testng.internal.objects.DefaultTestObjectFactory;
+import org.testng.internal.objects.Dispenser;
+import org.testng.internal.objects.IObjectDispenser;
+import org.testng.internal.objects.pojo.BasicAttributes;
+import org.testng.internal.objects.pojo.CreationAttributes;
+import org.testng.internal.reporters.ParameterSnapshotReader;
+import org.testng.internal.reporters.ParameterSnapshots;
+import org.testng.internal.thread.graph.SuiteWorkerFactory;
+import org.testng.log4testng.Logger;
+import org.testng.reporters.EmailableReporter2;
+import org.testng.reporters.FailedReporter;
+import org.testng.reporters.JUnitReportReporter;
+import org.testng.reporters.PerSuiteXMLReporter;
+import org.testng.reporters.VerboseReporter;
+import org.testng.reporters.XMLReporter;
+import org.testng.reporters.jq.Main;
+import org.testng.thread.IThreadWorkerFactory;
+import org.testng.util.Strings;
+import org.testng.xml.IPostProcessor;
+import org.testng.xml.XmlClass;
+import org.testng.xml.XmlInclude;
+import org.testng.xml.XmlMethodSelector;
+import org.testng.xml.XmlSuite;
+import org.testng.xml.XmlTest;
+import org.testng.xml.internal.Parser;
+import org.testng.xml.internal.TestNamesMatcher;
+import org.testng.xml.internal.XmlSuiteUtils;
+
+/**
+ * This class is the main entry point for running tests in the TestNG framework. Users can create
+ * their own TestNG object and invoke it in many different ways:
+ *
+ * <ul>
+ *   <li>On an existing testng.xml
+ *   <li>On a synthetic testng.xml, created entirely from Java
+ *   <li>By directly setting the test classes
+ * </ul>
+ *
+ * You can also define which groups to include or exclude, assign parameters, etc...
+ *
+ * <p>The command line parameters are:
+ *
+ * <UL>
+ *   <LI>-d <code>outputdir</code>: specify the output directory
+ *   <LI>-testclass <code>class_name</code>: specifies one or several class names
+ *   <LI>-testjar <code>jar_name</code>: specifies the jar containing the tests
+ *   <LI>-sourcedir <code>src1;src2</code>: ; separated list of source directories (used only when
+ *       javadoc annotations are used)
+ *   <LI>-target
+ *   <LI>-groups
+ *   <LI>-testrunfactory
+ *   <LI>-listener
+ * </UL>
+ *
+ * <p>Please consult documentation for more details.
+ *
+ * <p>FIXME: should support more than simple paths for suite xmls
+ *
+ * @see #usage()
+ * @author <a href = "mailto:cedric&#64;beust.com">Cedric Beust</a>
+ */
+@SuppressWarnings({"unused", "unchecked", "rawtypes"})
+public class TestNG {
+
+  /** This class' log4testng Logger. */
+  private static final Logger LOGGER = Logger.getLogger(TestNG.class);
+
+  /** The default name for a suite launched from the command line */
+  public static final String DEFAULT_COMMAND_LINE_SUITE_NAME = "Command line suite";
+
+  /** The default name for a test launched from the command line */
+  public static final String DEFAULT_COMMAND_LINE_TEST_NAME = "Command line test";
+
+  private static final String DEFAULT_THREADPOOL_FACTORY =
+      "org.testng.internal.thread.DefaultThreadPoolExecutorFactory";
+
+  /** The default name of the result's output directory (keep public, used by Eclipse). */
+  public static final String DEFAULT_OUTPUTDIR = "test-output";
+
+  /** The suite file looked up inside a jar when none was named. */
+  private static final String DEFAULT_XML_PATH_IN_JAR = "testng.xml";
+
+  /** How many suites run at once when none was asked for: one, so suites run sequentially. */
+  private static final Integer DEFAULT_SUITE_THREAD_POOL_SIZE = 1;
+
+  private static @Nullable TestNG m_instance;
+
+  private @Nullable List<String> m_commandLineMethods;
+  protected List<XmlSuite> m_suites = new ArrayList<>();
+  private @Nullable List<XmlSuite> m_cmdlineSuites;
+  private String m_outputDir = DEFAULT_OUTPUTDIR;
+  private String @Nullable [] m_includedGroups;
+  private String @Nullable [] m_excludedGroups;
+  protected boolean m_useDefaultListeners = true;
+  private boolean m_failIfAllTestsSkipped = false;
+  private final List<String> m_listenersToSkipFromBeingWiredIn = new ArrayList<>();
+
+  private @Nullable ITestRunnerFactory m_testRunnerFactory;
+
+  // These listeners can be overridden from the command line
+  private final Map<Class<? extends IClassListener>, IClassListener> m_classListeners =
+      new LinkedHashMap<>();
+  private final Map<Class<? extends ITestListener>, ITestListener> m_testListeners =
+      new LinkedHashMap<>();
+  private final Map<Class<? extends ISuiteListener>, ISuiteListener> m_suiteListeners =
+      new LinkedHashMap<>();
+  private final Map<Class<? extends IReporter>, IReporter> m_reporters = new LinkedHashMap<>();
+  private final Map<Class<? extends IDataProviderListener>, IDataProviderListener>
+      m_dataProviderListeners = new LinkedHashMap<>();
+  private final Map<Class<? extends IDataProviderInterceptor>, IDataProviderInterceptor>
+      m_dataProviderInterceptors = new LinkedHashMap<>();
+  private final Map<Class<? extends IParameterResolver>, IParameterResolver> m_parameterResolvers =
+      new LinkedHashMap<>();
+
+  public static final Integer DEFAULT_VERBOSE = 1;
+
+  // Command line suite parameters
+  private int m_threadCount = -1;
+  private XmlSuite.@Nullable ParallelMode m_parallelMode = null;
+  private XmlSuite.@Nullable FailurePolicy m_configFailurePolicy;
+  private Class<?> @Nullable [] m_commandLineTestClasses;
+
+  private String m_defaultSuiteName = DEFAULT_COMMAND_LINE_SUITE_NAME;
+  private String m_defaultTestName = DEFAULT_COMMAND_LINE_TEST_NAME;
+
+  private final Map<String, Integer> m_methodDescriptors = new HashMap<>();
+
+  private final Set<XmlMethodSelector> m_selectors = new LinkedHashSet<>();
+
+  private static final ITestObjectFactory DEFAULT_OBJECT_FACTORY = new DefaultTestObjectFactory();
+  private ITestObjectFactory m_objectFactory = DEFAULT_OBJECT_FACTORY;
+
+  private final Map<Class<? extends IInvokedMethodListener>, IInvokedMethodListener>
+      m_invokedMethodListeners = new LinkedHashMap<>();
+
+  private @Nullable Integer m_dataProviderThreadCount = null;
+
+  private @Nullable String m_jarPath;
+  /** The path of the testng.xml file inside the jar file */
+  private String m_xmlPathInJar = DEFAULT_XML_PATH_IN_JAR;
+
+  private List<String> m_stringSuites = new ArrayList<>();
+  private final List<Class<? extends ITestNGListener>> m_listenerClasses = new ArrayList<>();
+
+  private @Nullable IHookable m_hookable;
+  private @Nullable IConfigurable m_configurable;
+
+  protected long m_end;
+  protected long m_start;
+
+  private final Map<Class<? extends IAlterSuiteListener>, IAlterSuiteListener>
+      m_alterSuiteListeners = new LinkedHashMap<>();
+
+  private boolean m_isInitialized = false;
+  private boolean isSuiteInitialized = false;
+  private final org.testng.internal.ExitCodeListener exitCodeListener =
+      new org.testng.internal.ExitCodeListener();
+  private @Nullable ExitCode exitCode;
+  private final Map<Class<? extends IExecutionVisualiser>, IExecutionVisualiser>
+      m_executionVisualisers = new LinkedHashMap<>();
+
+  /** Default constructor. Setting also usage of default listeners/reporters. */
+  public TestNG() {
+    init(true);
+    if (RuntimeBehavior.isMemoryFriendlyMode()) {
+      Logger.getLogger(TestNG.class).warn("TestNG is running in memory friendly mode.");
+    }
+  }
+
+  /**
+   * Used by maven2 to have 0 output of any kind come out of testng.
+   *
+   * @param useDefaultListeners Whether or not any default reports should be added to tests.
+   */
+  public TestNG(boolean useDefaultListeners) {
+    init(useDefaultListeners);
+  }
+
+  private void init(boolean useDefaultListeners) {
+    m_instance = this;
+
+    m_useDefaultListeners = useDefaultListeners;
+    m_configuration = new Configuration();
+  }
+
+  /**
+   * @param failIfAllTestsSkipped - Whether TestNG should enable/disable failing when all the tests
+   *     were skipped and nothing was run (Mostly when a test is powered by a data provider and when
+   *     the data provider itself fails causing all tests to skip).
+   */
+  public void toggleFailureIfAllTestsWereSkipped(boolean failIfAllTestsSkipped) {
+    this.m_failIfAllTestsSkipped = failIfAllTestsSkipped;
+  }
+
+  /**
+   * @param listeners - An array of fully qualified class names that should be skipped from being
+   *     wired in via service loaders.
+   */
+  public void setListenersToSkipFromBeingWiredInViaServiceLoaders(String... listeners) {
+    m_listenersToSkipFromBeingWiredIn.addAll(Arrays.asList(listeners));
+  }
+
+  public int getStatus() {
+    if (exitCodeListener.noTestsFound()) {
+      return ExitCode.HAS_NO_TEST;
+    }
+    return requireExitCode().getExitCode();
+  }
+
+  /**
+   * Sets the output directory where the reports will be created.
+   *
+   * @param outputdir The directory.
+   */
+  public void setOutputDirectory(final String outputdir) {
+    if (isStringNotEmpty(outputdir)) {
+      m_outputDir = outputdir;
+    }
+  }
+
+  /**
+   * @param useDefaultListeners If true before run(), the default listeners will not be used.
+   *     <ul>
+   *       <li>org.testng.reporters.TestHTMLReporter
+   *       <li>org.testng.reporters.JUnitXMLReporter
+   *       <li>org.testng.reporters.XMLReporter
+   *     </ul>
+   *
+   * @see org.testng.reporters.TestHTMLReporter
+   * @see org.testng.reporters.JUnitXMLReporter
+   * @see org.testng.reporters.XMLReporter
+   */
+  public void setUseDefaultListeners(boolean useDefaultListeners) {
+    m_useDefaultListeners = useDefaultListeners;
+  }
+
+  public void setListenerComparator(ListenerComparator listenerComparator) {
+    this.m_configuration.setListenerComparator(listenerComparator);
+  }
+
+  /**
+   * @param listenerComparatorClass a {@link ListenerComparator} implementation, instantiated with
+   *     the object factory currently in use.
+   */
+  public void setListenerComparatorClass(
+      Class<? extends ListenerComparator> listenerComparatorClass) {
+    setListenerComparator(m_objectFactory.newInstance(listenerComparatorClass));
+  }
+
+  public @Nullable ListenerComparator getListenerComparator() {
+    return m_configuration.getListenerComparator();
+  }
+
+  /**
+   * Sets a jar containing a testng.xml file.
+   *
+   * @param jarPath - Path of the jar
+   */
+  public void setTestJar(@Nullable String jarPath) {
+    m_jarPath = jarPath;
+  }
+
+  /** @param xmlPathInJar Sets the path to the XML file in the test jar file. */
+  public void setXmlPathInJar(String xmlPathInJar) {
+    m_xmlPathInJar = xmlPathInJar;
+  }
+
+  private void parseSuiteFiles() {
+    IPostProcessor processor = getProcessor();
+    for (XmlSuite s : m_suites) {
+      if (s.isParsed()) {
+        continue;
+      }
+      for (String suiteFile : s.getSuiteFiles()) {
+        try {
+          String fileNameToUse = s.getFileName();
+          if (fileNameToUse == null || fileNameToUse.trim().isEmpty()) {
+            fileNameToUse = suiteFile;
+          }
+          Collection<XmlSuite> childSuites = Parser.parse(fileNameToUse, processor);
+          for (XmlSuite cSuite : childSuites) {
+            cSuite.setParentSuite(s);
+            s.getChildSuites().add(cSuite);
+          }
+        } catch (IOException e) {
+          e.printStackTrace(System.out);
+        }
+      }
+    }
+  }
+
+  private OverrideProcessor getProcessor() {
+    return new OverrideProcessor(m_includedGroups, m_excludedGroups);
+  }
+
+  private Collection<XmlSuite> parseSuite(String suitePath) {
+    if (LOGGER.isDebugEnabled()) {
+      LOGGER.debug("suiteXmlPath: \"" + suitePath + "\"");
+    }
+    try {
+      return Parser.parse(suitePath, getProcessor());
+    } catch (IOException e) {
+      throw new TestNGException("Failed to parse suite: " + suitePath, e);
+    } catch (Exception ex) {
+      // Probably a Yaml exception, unnest it
+      Throwable t = ex;
+      while (t.getCause() != null) {
+        t = t.getCause();
+      }
+      if (t instanceof TestNGException) {
+        throw (TestNGException) t;
+      }
+      throw new TestNGException(t);
+    }
+  }
+
+  private Collection<XmlSuite> processCommandLineArgs(Collection<XmlSuite> allSuites) {
+    Collection<XmlSuite> result = new ArrayList<>();
+    for (XmlSuite s : allSuites) {
+      processParallelModeCommandLineArgs(s);
+      if (m_testNames == null) {
+        result.add(s);
+        continue;
+      }
+      // If test names were specified, only run these test names
+      TestNamesMatcher testNamesMatcher =
+          new TestNamesMatcher(s, m_testNames, m_ignoreMissedTestNames);
+      testNamesMatcher.validateMissMatchedTestNames();
+      result.addAll(testNamesMatcher.getSuitesMatchingTestNames());
+    }
+
+    return result;
+  }
+
+  private void processParallelModeCommandLineArgs(XmlSuite suite) {
+    if (this.m_parallelMode != null) {
+      suite.setParallel(this.m_parallelMode);
+    }
+    if (this.m_threadCount > 0) {
+      suite.setThreadCount(this.m_threadCount);
+    }
+    if (suite.getChildSuites() != null) {
+      suite.getChildSuites().forEach(this::processParallelModeCommandLineArgs);
+    }
+  }
+
+  public void initializeSuitesAndJarFile() {
+    // The IntelliJ plug-in might have invoked this method already so don't initialize suites twice.
+    if (isSuiteInitialized) {
+      return;
+    }
+    isSuiteInitialized = true;
+
+    if (!m_suites.isEmpty()) {
+      parseSuiteFiles(); // to parse the suite files (<suite-file>), if any
+      return;
+    }
+
+    //
+    // Parse the suites that were passed on the command line
+    //
+    for (String suitePath : m_stringSuites) {
+      Collection<XmlSuite> allSuites = parseSuite(suitePath);
+      m_suites.addAll(processCommandLineArgs(allSuites));
+    }
+
+    //
+    // jar path
+    //
+    // If suites were passed on the command line, they take precedence over the suite file
+    // inside that jar path
+    if (m_jarPath != null && !m_stringSuites.isEmpty()) {
+      StringBuilder suites = new StringBuilder();
+      for (String s : m_stringSuites) {
+        suites.append(s);
+      }
+      Utils.log(
+          "TestNG",
+          2,
+          "Ignoring the XML file inside " + m_jarPath + " and using " + suites + " instead");
+      return;
+    }
+    if (isStringEmpty(m_jarPath)) {
+      return;
+    }
+
+    // We have a jar file and no XML file was specified: try to find an XML file inside the jar
+    File jarFile =
+        new File(
+            Objects.requireNonNull(m_jarPath, "a jar suite is only read once -testjar was given"));
+
+    JarFileUtils utils =
+        new JarFileUtils(
+            getProcessor(), m_xmlPathInJar, m_testNames, m_parallelMode, m_ignoreMissedTestNames);
+
+    Collection<XmlSuite> allSuites = utils.extractSuitesFrom(jarFile);
+    allSuites.forEach(this::processParallelModeCommandLineArgs);
+    m_suites.addAll(allSuites);
+  }
+
+  /** @param threadCount Define the number of threads in the thread pool. */
+  public void setThreadCount(int threadCount) {
+    if (threadCount < 1) {
+      // Reported rather than fatal: killing the JVM from a setter breaks every embedder, and
+      // TestNG#main is the one place allowed to turn a bad value into an exit code.
+      throw new TestNGException(
+          "Cannot use a threadCount parameter less than 1; 1 > " + threadCount);
+    }
+
+    m_threadCount = threadCount;
+  }
+
+  /**
+   * @param parallel Define whether this run will be run in parallel mode.
+   * @deprecated Use #setParallel(XmlSuite.ParallelMode) instead
+   */
+  @Deprecated
+  // TODO: krmahadevan: This method is being used by Gradle. Removal causes build failures.
+  public void setParallel(String parallel) {
+    setParallel(XmlSuite.ParallelMode.getValidParallel(parallel));
+  }
+
+  public void setParallel(XmlSuite.ParallelMode parallel) {
+    m_parallelMode = parallel;
+  }
+
+  public void setCommandLineSuite(XmlSuite suite) {
+    m_cmdlineSuites = new ArrayList<>();
+    m_cmdlineSuites.add(suite);
+    m_suites.add(suite);
+  }
+
+  /**
+   * Set the test classes to be run by this TestNG object. This method will create a dummy suite
+   * that will wrap these classes called "Command Line Test".
+   *
+   * <p>If used together with threadCount, parallel, groups, excludedGroups than this one must be
+   * set first.
+   *
+   * @param classes An array of classes that contain TestNG annotations.
+   */
+  public void setTestClasses(Class[] classes) {
+    m_suites.clear();
+    m_commandLineTestClasses = classes;
+  }
+
+  /**
+   * Given a string com.example.Foo.f1, return an array where [0] is the class and [1] is the
+   * method.
+   */
+  private String[] splitMethod(String m) {
+    int index = m.lastIndexOf(".");
+    if (index < 0) {
+      throw new TestNGException(
+          "Bad format for command line method:" + m + ", expected <class>.<method>");
+    }
+
+    return new String[] {m.substring(0, index), m.substring(index + 1).replaceAll("\\*", "\\.\\*")};
+  }
+
+  /**
+   * @return a list of XmlSuite objects that represent the list of classes and methods passed in
+   *     parameter.
+   * @param commandLineMethods a string with the form "com.example.Foo.f1,com.example.Bar.f2"
+   */
+  private List<XmlSuite> createCommandLineSuitesForMethods(List<String> commandLineMethods) {
+    //
+    // Create the <classes> tag
+    //
+    Set<Class> classes = new HashSet<>();
+    for (String m : commandLineMethods) {
+      Class c = ClassHelper.forName(splitMethod(m)[0]);
+      if (c != null) {
+        classes.add(c);
+      }
+    }
+
+    List<XmlSuite> result = createCommandLineSuitesForClasses(classes.toArray(new Class[0]));
+
+    //
+    // Add the method tags
+    //
+    List<XmlClass> xmlClasses = new ArrayList<>();
+    for (XmlSuite s : result) {
+      for (XmlTest t : s.getTests()) {
+        xmlClasses.addAll(t.getClasses());
+      }
+    }
+
+    for (XmlClass xc : xmlClasses) {
+      for (String m : commandLineMethods) {
+        String[] split = splitMethod(m);
+        String className = split[0];
+        if (xc.getName().equals(className)) {
+          XmlInclude includedMethod = new XmlInclude(split[1]);
+          xc.getIncludedMethods().add(includedMethod);
+        }
+      }
+    }
+
+    return result;
+  }
+
+  private List<XmlSuite> createCommandLineSuitesForClasses(Class[] classes) {
+    //
+    // See if any of the classes has an xmlSuite or xmlTest attribute.
+    // If it does, create the appropriate XmlSuite, otherwise, create
+    // the default one
+    //
+
+    XmlClass[] xmlClasses =
+        Arrays.stream(classes).map(clazz -> new XmlClass(clazz, true)).toArray(XmlClass[]::new);
+    Map<String, XmlSuite> suites = new HashMap<>();
+    IAnnotationFinder finder = m_configuration.getAnnotationFinder();
+
+    for (int i = 0; i < classes.length; i++) {
+      Class<?> c = classes[i];
+      ITestAnnotation test = finder.findAnnotation(c, ITestAnnotation.class);
+      String suiteName = getDefaultSuiteName();
+      String testName = getDefaultTestName();
+      if (test != null) {
+        suiteName = defaultIfStringEmpty(test.getSuiteName(), suiteName);
+        testName = defaultIfStringEmpty(test.getTestName(), testName);
+      }
+      XmlSuite xmlSuite = suites.get(suiteName);
+      if (xmlSuite == null) {
+        xmlSuite = new XmlSuite();
+        xmlSuite.setName(suiteName);
+        suites.put(suiteName, xmlSuite);
+      }
+
+      if (m_dataProviderThreadCount != null) {
+        xmlSuite.setDataProviderThreadCount(m_dataProviderThreadCount);
+      }
+      XmlTest xmlTest = null;
+      for (XmlTest xt : xmlSuite.getTests()) {
+        if (testName.equals(xt.getName())) {
+          xmlTest = xt;
+          break;
+        }
+      }
+
+      if (xmlTest == null) {
+        xmlTest = new XmlTest(xmlSuite);
+        xmlTest.setName(testName);
+      }
+
+      xmlTest.getXmlClasses().add(xmlClasses[i]);
+    }
+
+    return new ArrayList<>(suites.values());
+  }
+
+  public void addMethodSelector(@Nullable String className, int priority) {
+    if (Strings.isNotNullAndNotEmpty(className)) {
+      m_methodDescriptors.put(className, priority);
+    }
+  }
+
+  public void addMethodSelector(XmlMethodSelector selector) {
+    m_selectors.add(selector);
+  }
+
+  public void setReportAllDataDrivenTestsAsSkipped(boolean reportAllDataDrivenTestsAsSkipped) {
+    this.m_configuration.setReportAllDataDrivenTestsAsSkipped(reportAllDataDrivenTestsAsSkipped);
+  }
+
+  public boolean getReportAllDataDrivenTestsAsSkipped() {
+    return this.m_configuration.getReportAllDataDrivenTestsAsSkipped();
+  }
+
+  public void propagateDataProviderFailureAsTestFailure() {
+    this.m_configuration.propagateDataProviderFailureAsTestFailure();
+  }
+
+  public boolean isPropagateDataProviderFailureAsTestFailure() {
+    return this.m_configuration.isPropagateDataProviderFailureAsTestFailure();
+  }
+
+  public void shareThreadPoolForDataProviders(boolean flag) {
+    this.m_configuration.shareThreadPoolForDataProviders(flag);
+  }
+
+  public boolean isShareThreadPoolForDataProviders() {
+    return this.m_configuration.isShareThreadPoolForDataProviders();
+  }
+
+  public boolean useGlobalThreadPool() {
+    return this.m_configuration.useGlobalThreadPool();
+  }
+
+  public void shouldUseGlobalThreadPool(boolean flag) {
+    this.m_configuration.shouldUseGlobalThreadPool(flag);
+  }
+
+  /**
+   * Enables (or disables) lazy, just-in-time instantiation of {@code @Factory} produced test class
+   * instances at the runner level. This is the broadest opt-in; it is overridden by the suite level
+   * {@code lazy-factory} attribute and by the {@code @Factory(lazy=...)} annotation. Honored only
+   * for constructor based factories.
+   *
+   * @param flag - {@code true} to instantiate factory instances lazily by default.
+   */
+  public void setLazyFactoryInstantiation(boolean flag) {
+    this.m_configuration.setLazyFactoryInstantiation(flag);
+  }
+
+  public boolean isLazyFactoryInstantiation() {
+    return this.m_configuration.isLazyFactoryInstantiation();
+  }
+
+  public EmptyDataProviderBehavior getEmptyDataProviderBehavior() {
+    return this.m_configuration.getEmptyDataProviderBehavior();
+  }
+
+  public void setEmptyDataProviderBehavior(EmptyDataProviderBehavior emptyDataProviderBehavior) {
+    this.m_configuration.setEmptyDataProviderBehavior(emptyDataProviderBehavior);
+  }
+
+  /**
+   * Set the suites file names to be run by this TestNG object. This method tries to load and parse
+   * the specified TestNG suite xml files. If a file is missing, it is ignored.
+   *
+   * @param suites A list of paths to one more XML files defining the tests. For example:
+   *     <pre>
+   * TestNG tng = new TestNG();
+   * List&lt;String&gt; suites = new ArrayList&lt;&gt;();
+   * suites.add("c:/tests/testng1.xml");
+   * suites.add("c:/tests/testng2.xml");
+   * tng.setTestSuites(suites);
+   * tng.run();
+   * </pre>
+   */
+  public void setTestSuites(List<String> suites) {
+    m_stringSuites = suites;
+  }
+
+  /**
+   * Specifies the XmlSuite objects to run.
+   *
+   * @param suites - The list of {@link XmlSuite} objects.
+   * @see org.testng.xml.XmlSuite
+   */
+  public void setXmlSuites(List<XmlSuite> suites) {
+    m_suites = suites;
+  }
+
+  /**
+   * Define which groups will be excluded from this run.
+   *
+   * @param groups A list of group names separated by a comma.
+   */
+  public void setExcludedGroups(@Nullable String groups) {
+    m_excludedGroups = Utils.split(groups, ",");
+  }
+
+  /**
+   * Define which groups will be included from this run.
+   *
+   * @param groups A list of group names separated by a comma.
+   */
+  public void setGroups(@Nullable String groups) {
+    m_includedGroups = Utils.split(groups, ",");
+  }
+
+  public void setTestRunnerFactoryClass(
+      Class<? extends ITestRunnerFactory> testRunnerFactoryClass) {
+    setTestRunnerFactory(m_objectFactory.newInstance(testRunnerFactoryClass));
+  }
+
+  protected void setTestRunnerFactory(ITestRunnerFactory itrf) {
+    m_testRunnerFactory = itrf;
+  }
+
+  public void setObjectFactory(Class<? extends ITestObjectFactory> c) {
+    setObjectFactory(m_objectFactory.newInstance(c));
+  }
+
+  public void setObjectFactory(ITestObjectFactory factory) {
+    m_objectFactory = factory;
+  }
+
+  /**
+   * Define which listeners to user for this run.
+   *
+   * @param classes A list of classes, which must be either ISuiteListener, ITestListener or
+   *     IReporter
+   */
+  public void setListenerClasses(List<Class<? extends ITestNGListener>> classes) {
+    ITestNGListenerFactory factory = m_configuration.getListenerFactory();
+    if (factory == null) {
+      // CLI configure() calls this before setTestSuites(), so m_suites is still
+      // empty. Remember the classes and instantiate them once the suite exists,
+      // so a -listener can inherit that suite's Guice parent-module.
+      m_listenerClasses.addAll(classes);
+      if (!m_suites.isEmpty()) {
+        instantiatePendingListenerClasses();
+      }
+      return;
+    }
+    for (Class<? extends ITestNGListener> cls : classes) {
+      ITestNGListener created = factory.createListener(cls);
+      if (created != null) {
+        addListener(created);
+      }
+    }
+  }
+
+  private void instantiatePendingListenerClasses() {
+    if (m_listenerClasses.isEmpty()) {
+      return;
+    }
+    XmlSuite suite = m_suites.isEmpty() ? new XmlSuite() : m_suites.get(0);
+    IObjectDispenser dispenser = Dispenser.newInstance(m_objectFactory);
+    GuiceContext context = new GuiceContext(suite, this.m_configuration);
+    for (Class<? extends ITestNGListener> cls : m_listenerClasses) {
+      BasicAttributes basic = new BasicAttributes(null, cls);
+      CreationAttributes attributes = new CreationAttributes(basic, context);
+      Object created = dispenser.dispense(attributes);
+      if (created != null) {
+        addListener((ITestNGListener) created);
+      }
+    }
+    m_listenerClasses.clear();
+  }
+
+  /**
+   * @param listener The listener to add
+   * @deprecated Use addListener(ITestNGListener) instead
+   */
+  // TODO remove later /!\ Caution: IntelliJ is using it. Check with @akozlova before removing it
+  @Deprecated
+  public void addListener(Object listener) {
+    if (!(listener instanceof ITestNGListener)) {
+      exitWithError(
+          "Listener "
+              + listener
+              + " must be one of ITestListener, ISuiteListener, IReporter, "
+              + " IAnnotationTransformer, IMethodInterceptor or IInvokedMethodListener");
+    }
+    addListener((ITestNGListener) listener);
+  }
+
+  private static <E> void maybeAddListener(Map<Class<? extends E>, E> map, E value) {
+    maybeAddListener(map, (Class<? extends E>) value.getClass(), value, false);
+  }
+
+  private static <E> void maybeAddListener(
+      Map<Class<? extends E>, E> map, Class<? extends E> type, E value, boolean quiet) {
+    if (map.putIfAbsent(type, value) != null && !quiet) {
+      LOGGER.warn("Ignoring duplicate listener : " + type.getName());
+    }
+  }
+
+  public void addListener(ITestNGListener listener) {
+    if (listener == null) {
+      return;
+    }
+    if (!listener.isEnabled()) {
+      return;
+    }
+    if (listener instanceof IExecutionVisualiser) {
+      IExecutionVisualiser visualiser = (IExecutionVisualiser) listener;
+      maybeAddListener(m_executionVisualisers, visualiser);
+    }
+    if (listener instanceof ISuiteListener) {
+      ISuiteListener suite = (ISuiteListener) listener;
+      maybeAddListener(m_suiteListeners, suite);
+    }
+    if (listener instanceof ITestListener) {
+      ITestListener test = (ITestListener) listener;
+      maybeAddListener(m_testListeners, test);
+    }
+    if (listener instanceof IClassListener) {
+      IClassListener clazz = (IClassListener) listener;
+      maybeAddListener(m_classListeners, clazz);
+    }
+    if (listener instanceof IReporter) {
+      IReporter reporter = (IReporter) listener;
+      maybeAddListener(m_reporters, reporter);
+    }
+    if (listener instanceof IAnnotationTransformer) {
+      setAnnotationTransformer((IAnnotationTransformer) listener);
+    }
+    if (listener instanceof IMethodInterceptor) {
+      m_methodInterceptors.add((IMethodInterceptor) listener);
+    }
+    if (listener instanceof IInvokedMethodListener) {
+      IInvokedMethodListener method = (IInvokedMethodListener) listener;
+      maybeAddListener(m_invokedMethodListeners, method);
+    }
+    if (listener instanceof IHookable) {
+      setHookable((IHookable) listener);
+    }
+    if (listener instanceof IConfigurable) {
+      setConfigurable((IConfigurable) listener);
+    }
+    if (listener instanceof IExecutionListener) {
+      m_configuration.addExecutionListenerIfAbsent((IExecutionListener) listener);
+    }
+    if (listener instanceof IConfigurationListener) {
+      m_configuration.addConfigurationListener((IConfigurationListener) listener);
+    }
+    if (listener instanceof IAlterSuiteListener) {
+      IAlterSuiteListener alter = (IAlterSuiteListener) listener;
+      maybeAddListener(m_alterSuiteListeners, alter);
+    }
+    if (listener instanceof IDataProviderListener) {
+      IDataProviderListener dataProvider = (IDataProviderListener) listener;
+      maybeAddListener(m_dataProviderListeners, dataProvider);
+    }
+    if (listener instanceof IDataProviderInterceptor) {
+      IDataProviderInterceptor interceptor = (IDataProviderInterceptor) listener;
+      maybeAddListener(m_dataProviderInterceptors, interceptor);
+    }
+    if (listener instanceof IParameterResolver) {
+      IParameterResolver resolver = (IParameterResolver) listener;
+      maybeAddListener(m_parameterResolvers, resolver);
+    }
+  }
+
+  public Set<IReporter> getReporters() {
+    // This will now cause a different behavior for consumers of this method because unlike before
+    // they are no longer
+    // going to be getting the original set but only a copy of it (since we internally moved from
+    // Sets to Maps)
+    return new HashSet<>(m_reporters.values());
+  }
+
+  public List<ITestListener> getTestListeners() {
+    return new ArrayList<>(m_testListeners.values());
+  }
+
+  public List<ISuiteListener> getSuiteListeners() {
+    return new ArrayList<>(m_suiteListeners.values());
+  }
+
+  /** If m_verbose gets set, it will override the verbose setting in testng.xml */
+  private @Nullable Integer m_verbose = null;
+
+  private final IAnnotationTransformer m_defaultAnnoProcessor = new DefaultAnnotationTransformer();
+  private IAnnotationTransformer m_annotationTransformer = m_defaultAnnoProcessor;
+
+  private @Nullable Boolean m_skipFailedInvocationCounts = false;
+
+  private final List<IMethodInterceptor> m_methodInterceptors = new ArrayList<>();
+
+  /** The list of test names to run from the given suite */
+  private @Nullable List<String> m_testNames;
+
+  private boolean m_ignoreMissedTestNames;
+
+  private Integer m_suiteThreadPoolSize = DEFAULT_SUITE_THREAD_POOL_SIZE;
+
+  private boolean m_randomizeSuites = false;
+
+  private boolean m_alwaysRun = true;
+
+  private Boolean m_preserveOrder = XmlSuite.DEFAULT_PRESERVE_ORDER;
+  private @Nullable Boolean m_groupByInstances;
+  private boolean m_generateResultsPerSuite = false;
+
+  private IConfiguration m_configuration;
+
+  /**
+   * Sets the level of verbosity. This value will override the value specified in the test suites.
+   *
+   * @param verbose the verbosity level (0 to 10 where 10 is most detailed) Actually, this is a lie:
+   *     you can specify -1 and this will put TestNG in debug mode (no longer slicing off stack
+   *     traces and all).
+   */
+  public void setVerbose(int verbose) {
+    m_verbose = verbose;
+  }
+
+  public void setExecutorServiceFactory(IExecutorServiceFactory factory) {
+    m_configuration.setExecutorServiceFactory(
+        Objects.requireNonNull(factory, "ExecutorServiceFactory cannot be null"));
+  }
+
+  /**
+   * @param factoryClass an {@link IExecutorServiceFactory} implementation, instantiated with the
+   *     object factory currently in use.
+   */
+  public void setExecutorServiceFactoryClass(
+      Class<? extends IExecutorServiceFactory> factoryClass) {
+    setExecutorServiceFactory(m_objectFactory.newInstance(factoryClass));
+  }
+
+  public void setListenerFactory(ITestNGListenerFactory factory) {
+    this.m_configuration.setListenerFactory(factory);
+  }
+
+  /**
+   * @param factoryClass an {@link ITestNGListenerFactory} implementation, instantiated with the
+   *     object factory currently in use.
+   */
+  public void setListenerFactoryClass(Class<? extends ITestNGListenerFactory> factoryClass) {
+    setListenerFactory(m_objectFactory.newInstance(factoryClass));
+  }
+
+  public void setGenerateResultsPerSuite(boolean generateResultsPerSuite) {
+    this.m_generateResultsPerSuite = generateResultsPerSuite;
+  }
+
+  private void initializeCommandLineSuites() {
+    if (m_commandLineTestClasses != null || m_commandLineMethods != null) {
+      List<String> cliMethods = m_commandLineMethods;
+      Class<?>[] cliClasses = m_commandLineTestClasses;
+      m_cmdlineSuites =
+          cliMethods != null
+              ? createCommandLineSuitesForMethods(cliMethods)
+              : createCommandLineSuitesForClasses(
+                  Objects.requireNonNull(cliClasses, "one of the two command line inputs is set"));
+
+      for (XmlSuite s : m_cmdlineSuites) {
+        for (XmlTest t : s.getTests()) {
+          t.setPreserveOrder(m_preserveOrder);
+        }
+        m_suites.add(s);
+        if (m_groupByInstances != null) {
+          s.setGroupByInstances(m_groupByInstances);
+        }
+      }
+    }
+  }
+
+  private void initializeCommandLineSuitesParams() {
+    if (null == m_cmdlineSuites) {
+      return;
+    }
+
+    for (XmlSuite s : m_cmdlineSuites) {
+      if (m_threadCount != -1) {
+        s.setThreadCount(m_threadCount);
+      }
+      if (m_parallelMode != null) {
+        s.setParallel(m_parallelMode);
+      }
+      if (m_configFailurePolicy != null) {
+        s.setConfigFailurePolicy(m_configFailurePolicy);
+      }
+    }
+  }
+
+  private void initializeCommandLineSuitesGroups() {
+    // If groups were specified on the command line, they should override groups
+    // specified in the XML file
+    List<XmlSuite> suites = m_cmdlineSuites != null ? m_cmdlineSuites : m_suites;
+    for (XmlSuite s : suites) {
+      initializeCommandLineSuitesGroups(s, m_includedGroups, m_excludedGroups);
+    }
+  }
+
+  private static void initializeCommandLineSuitesGroups(
+      XmlSuite s, String @Nullable [] included, String @Nullable [] excluded) {
+    if (included != null && included.length > 0) {
+      s.setIncludedGroups(Arrays.asList(included));
+    }
+    if (excluded != null && excluded.length > 0) {
+      s.setExcludedGroups(Arrays.asList(excluded));
+    }
+    for (XmlSuite child : s.getChildSuites()) {
+      initializeCommandLineSuitesGroups(child, included, excluded);
+    }
+  }
+
+  private void addReporter(Class<? extends IReporter> r) {
+    if (!m_reporters.containsKey(r)) {
+      m_reporters.put(r, m_objectFactory.newInstance(r));
+    }
+  }
+
+  private void initializeDefaultListeners() {
+    if (m_failIfAllTestsSkipped) {
+      this.exitCodeListener.failIfAllTestsSkipped();
+    }
+    if (m_useDefaultListeners) {
+      addReporter(Main.class);
+      addReporter(FailedReporter.class);
+      if (m_generateResultsPerSuite) {
+        addReporter(PerSuiteXMLReporter.class);
+      } else {
+        addReporter(XMLReporter.class);
+      }
+      if (RuntimeBehavior.useEmailableReporter()) {
+        addReporter(EmailableReporter2.class);
+      }
+      addReporter(JUnitReportReporter.class);
+      if (m_verbose != null && m_verbose > 4) {
+        addListener(new VerboseReporter("[TestNG] "));
+      }
+    }
+  }
+
+  // Identity on purpose, for the one comparison below that is not a null test.
+  // DEFAULT_OBJECT_FACTORY is a sentinel meaning "no suite has named a factory yet", and a suite
+  // that names one replaces it with an instance of a user class whose equals TestNG does not own.
+  @SuppressWarnings("ReferenceEquality")
+  private void initializeConfiguration() {
+    ITestObjectFactory factory = m_objectFactory;
+    //
+    // Install the listeners found in ServiceLoader (or use the class
+    // loader for tests, if specified).
+    //
+    addServiceLoaderListeners();
+    instantiatePendingListenerClasses();
+
+    //
+    // Install the listeners found in the suites
+    //
+    for (XmlSuite s : m_suites) {
+      addListeners(s);
+
+      //
+      // Install the method selectors
+      //
+      for (XmlMethodSelector methodSelector : s.getMethodSelectors()) {
+        addMethodSelector(methodSelector.getClassName(), methodSelector.getPriority());
+        addMethodSelector(methodSelector);
+      }
+
+      //
+      // Find if we have an object factory
+      //
+      if (s.getObjectFactoryClass() != null) {
+        if (factory != DEFAULT_OBJECT_FACTORY) {
+          throw new TestNGException("Found more than one object-factory tag in your suites");
+        }
+        factory = m_objectFactory.newInstance(s.getObjectFactoryClass());
+      }
+    }
+
+    m_configuration.setAnnotationFinder(new JDK15AnnotationFinder(getAnnotationTransformer()));
+    m_configuration.setHookable(m_hookable);
+    m_configuration.setConfigurable(m_configurable);
+    m_configuration.setObjectFactory(factory);
+    m_configuration.setAlwaysRunListeners(this.m_alwaysRun);
+  }
+
+  private void addListeners(XmlSuite s) {
+    IObjectDispenser dispenser = Dispenser.newInstance(m_objectFactory);
+    GuiceContext context = new GuiceContext(s, this.m_configuration);
+    for (String listenerName : s.getListeners()) {
+      Class<?> listenerClass = ClassHelper.forName(listenerName);
+
+      // If specified listener does not exist, a TestNGException will be thrown
+      if (listenerClass == null) {
+        throw new TestNGException(
+            "Listener " + listenerName + " was not found in project's classpath");
+      }
+
+      BasicAttributes basic = new BasicAttributes(null, listenerClass);
+      CreationAttributes attribute = new CreationAttributes(basic, context);
+      Object listener = dispenser.dispense(attribute);
+      if (listener != null) {
+        addListener((ITestNGListener) listener);
+      }
+    }
+
+    // Add the child suite listeners
+    List<XmlSuite> childSuites = s.getChildSuites();
+    for (XmlSuite c : childSuites) {
+      addListeners(c);
+    }
+  }
+
+  /** Using reflection to remain Java 5 compliant. */
+  private void addServiceLoaderListeners() {
+    Iterable<ITestNGListener> loader =
+        m_serviceLoaderClassLoader != null
+            ? ServiceLoader.load(ITestNGListener.class, m_serviceLoaderClassLoader)
+            : ServiceLoader.load(ITestNGListener.class);
+    for (ITestNGListener l : loader) {
+      Utils.log("[TestNG]", 2, "Adding ServiceLoader listener:" + l);
+      if (m_listenersToSkipFromBeingWiredIn.contains(l.getClass().getName())) {
+        Utils.log("[TestNG]", 2, "Skipping adding the listener :" + l);
+        continue;
+      }
+      addListener(l);
+      addServiceLoaderListener(l);
+    }
+  }
+
+  /**
+   * Before suites are executed, do a sanity check to ensure all required conditions are met. If
+   * not, throw an exception to stop test execution
+   *
+   * @throws TestNGException if the sanity check fails
+   */
+  private void sanityCheck() {
+    XmlSuiteUtils.validateIfSuitesContainDuplicateTests(m_suites);
+    XmlSuiteUtils.adjustSuiteNamesToEnsureUniqueness(m_suites);
+  }
+
+  /** Invoked by the remote runner. */
+  public void initializeEverything() {
+    // The Eclipse plug-in (RemoteTestNG) might have invoked this method already
+    // so don't initialize suites twice.
+    if (m_isInitialized) {
+      return;
+    }
+
+    initializeSuitesAndJarFile();
+    initializeConfiguration();
+    initializeDefaultListeners();
+    initializeCommandLineSuites();
+    initializeCommandLineSuitesParams();
+    initializeCommandLineSuitesGroups();
+
+    m_isInitialized = true;
+  }
+
+  /** Run TestNG. */
+  public void run() {
+    initializeEverything();
+    sanityCheck();
+
+    runExecutionListeners(true /* start */);
+
+    runSuiteAlterationListeners();
+
+    m_start = System.currentTimeMillis();
+    List<ISuite> suiteRunners = runSuites();
+
+    m_end = System.currentTimeMillis();
+
+    if (null != suiteRunners) {
+      suiteRunners.forEach(ObjectBag::cleanup);
+      try {
+        generateReports(suiteRunners);
+      } finally {
+        // The reporters are the last thing that can read a reporting snapshot.
+        suiteRunners.forEach(ParameterSnapshots::detachFrom);
+      }
+    }
+
+    runExecutionListeners(false /* finish */);
+    exitCode = this.exitCodeListener.getStatus();
+
+    if (exitCodeListener.noTestsFound()) {
+      if (TestRunner.getVerbose() > 1) {
+        System.err.println("[TestNG] No tests found. Nothing was run");
+        usage();
+      }
+    }
+
+    m_instance = null;
+  }
+
+  /**
+   * Run the test suites.
+   *
+   * <p>This method can be overridden by subclass. <br>
+   * For example, DistributedTestNG to run in master/slave mode according to commandline args.
+   *
+   * @return - List of suites that were run as {@link ISuite} objects.
+   * @since 6.9.11 when moving distributed/remote classes out into separate project
+   */
+  protected List<ISuite> runSuites() {
+    return runSuitesLocally();
+  }
+
+  private void runSuiteAlterationListeners() {
+    Collection<IAlterSuiteListener> original =
+        sort(m_alterSuiteListeners.values(), m_configuration.getListenerComparator());
+    for (IAlterSuiteListener l : original) {
+      l.alter(m_suites);
+    }
+  }
+
+  private void runExecutionListeners(boolean start) {
+    List<IExecutionListener> executionListeners =
+        ListenerOrderDeterminer.order(
+            m_configuration.getExecutionListeners(), m_configuration.getListenerComparator());
+    if (start) {
+      for (IExecutionListener l : executionListeners) {
+        l.onExecutionStart();
+      }
+      // Invoke our exit code listener after all the user's listeners have run.
+      exitCodeListener.onExecutionStart();
+    } else {
+      List<IExecutionListener> executionListenersReversed =
+          ListenerOrderDeterminer.reversedOrder(
+              m_configuration.getExecutionListeners(), m_configuration.getListenerComparator());
+      for (IExecutionListener l : executionListenersReversed) {
+        l.onExecutionFinish();
+      }
+      // Invoke our exit code listener after all the user's listeners have run.
+      exitCodeListener.onExecutionFinish();
+    }
+  }
+
+  private static void usage() {
+    // find() rather than required(): printing usage must never be the thing that fails.
+    ITestNGCliRunner runner = CliRunners.find();
+    if (runner != null) {
+      try {
+        runner.usage();
+        return;
+      } catch (RuntimeException ignored) {
+        // A third party runner must not break the callers of usage(), which include plain Java API
+        // paths such as runSuitesLocally(). Fall through to the built-in banner.
+      }
+    }
+    // Written to stdout, like the banner a command line runner produces.
+    System.out.println(
+        "Usage: java "
+            + TestNG.class.getName()
+            + " [options] <testng.xml> ...\n"
+            + "Detailed command line help requires an "
+            + ITestNGCliRunner.class.getName()
+            + " implementation on the classpath; the org.testng:testng jar bundles one.");
+  }
+
+  private void generateReports(List<ISuite> suiteRunners) {
+    List<IReporter> reporters = new ArrayList<>(m_reporters.values());
+    // Add our Exit code listener as the last of the reporter so that we can still accommodate
+    // whatever changes were done by a user's reporting listener
+    reporters.add(exitCodeListener);
+    for (IReporter reporter : reporters) {
+      try {
+        long start = System.currentTimeMillis();
+        reporter.generateReport(m_suites, suiteRunners, m_outputDir);
+        Utils.log(
+            "TestNG",
+            2,
+            "Time taken by " + reporter + ": " + (System.currentTimeMillis() - start) + " ms");
+      } catch (Exception ex) {
+        System.err.println("[TestNG] Reporter " + reporter + " failed");
+        ex.printStackTrace(System.err);
+      }
+    }
+  }
+
+  /**
+   * This needs to be public for maven2, for now..At least until an alternative mechanism is found.
+   *
+   * @return The locally run suites
+   */
+  public List<ISuite> runSuitesLocally() {
+    if (m_suites.isEmpty()) {
+      error("No test suite found. Nothing to run");
+      usage();
+      return new ArrayList<>();
+    }
+
+    SuiteRunnerMap suiteRunnerMap = new SuiteRunnerMap();
+
+    if (m_suites.get(0).getVerbose() >= 2) {
+      Version.displayBanner();
+    }
+
+    // First initialize the suite runners to ensure there are no configuration issues.
+    // Create a map with XmlSuite as key and corresponding SuiteRunner as value
+    for (XmlSuite xmlSuite : m_suites) {
+      if (m_configuration.isShareThreadPoolForDataProviders()) {
+        xmlSuite.setShareThreadPoolForDataProviders(true);
+      }
+      if (m_configuration.useGlobalThreadPool()) {
+        xmlSuite.shouldUseGlobalThreadPool(true);
+      }
+      createSuiteRunners(suiteRunnerMap, xmlSuite);
+    }
+
+    // Every reporter of the run is known by now -- the ones a suite declared arrived with it, and
+    // createSuiteRunner() folded them in -- and no suite has started, which is what a reporting
+    // snapshot has to be requested before. The reporters registered on a TestRunner instead ask for
+    // themselves; see ParameterSnapshotReader.
+    ParameterSnapshotReader.requestCaptureIfAnyReads(m_reporters.values(), suiteRunnerMap.values());
+
+    //
+    // Run suites
+    //
+    if (m_suiteThreadPoolSize == 1 && !m_randomizeSuites) {
+      // Single threaded and not randomized: run the suites in order
+      for (XmlSuite xmlSuite : m_suites) {
+        runSuitesSequentially(
+            xmlSuite, suiteRunnerMap, getVerbose(xmlSuite), getDefaultSuiteName());
+      }
+      //
+      // Generate the suites report
+      //
+      return new ArrayList<>(suiteRunnerMap.values());
+    }
+    // Multithreaded: generate a dynamic graph that stores the suite hierarchy. This is then
+    // used to run related suites in specific order. Parent suites are run only
+    // once all the child suites have completed execution
+    IDynamicGraph<ISuite> suiteGraph = new DynamicGraph<>();
+    for (XmlSuite xmlSuite : m_suites) {
+      populateSuiteGraph(suiteGraph, suiteRunnerMap, xmlSuite);
+    }
+
+    IThreadWorkerFactory<ISuite> factory =
+        new SuiteWorkerFactory(
+            suiteRunnerMap, 0 /* verbose hasn't been set yet */, getDefaultSuiteName());
+    SuiteTaskExecutor taskExecutor =
+        new SuiteTaskExecutor(
+            this.m_configuration,
+            factory,
+            new LinkedBlockingQueue<>(),
+            suiteGraph,
+            m_suiteThreadPoolSize);
+    taskExecutor.execute();
+    taskExecutor.awaitCompletion();
+
+    //
+    // Generate the suites report
+    //
+    return new ArrayList<>(suiteRunnerMap.values());
+  }
+
+  private static void error(@Nullable String s) {
+    LOGGER.error(s);
+  }
+
+  /**
+   * @return the verbose level, checking in order: the verbose level on the suite, the verbose level
+   *     on the TestNG object, or 1.
+   */
+  private int getVerbose(XmlSuite xmlSuite) {
+    return xmlSuite.getVerbose() != null
+        ? xmlSuite.getVerbose()
+        : (m_verbose != null ? m_verbose : RuntimeBehavior.getDefaultVerboseLevel());
+  }
+
+  /**
+   * Recursively runs suites. Runs the children suites before running the parent suite. This is done
+   * so that the results for parent suite can reflect the combined results of the children suites.
+   *
+   * @param xmlSuite XML Suite to be executed
+   * @param suiteRunnerMap Maps {@code XmlSuite}s to respective {@code ISuite}
+   * @param verbose verbose level
+   * @param defaultSuiteName default suite name
+   */
+  private void runSuitesSequentially(
+      XmlSuite xmlSuite, SuiteRunnerMap suiteRunnerMap, int verbose, String defaultSuiteName) {
+    for (XmlSuite childSuite : xmlSuite.getChildSuites()) {
+      runSuitesSequentially(childSuite, suiteRunnerMap, verbose, defaultSuiteName);
+    }
+    SuiteRunnerWorker srw =
+        new SuiteRunnerWorker(
+            suiteRunnerMap.require(xmlSuite), suiteRunnerMap, verbose, defaultSuiteName);
+    srw.run();
+  }
+
+  /**
+   * Populates the dynamic graph with the reverse hierarchy of suites. Edges are added pointing from
+   * child suite runners to parent suite runners, hence making parent suite runners dependent on all
+   * the child suite runners
+   *
+   * @param suiteGraph dynamic graph representing the reverse hierarchy of SuiteRunners
+   * @param suiteRunnerMap Map with XMLSuite as key and its respective SuiteRunner as value
+   * @param xmlSuite XML Suite
+   */
+  private void populateSuiteGraph(
+      IDynamicGraph<ISuite> suiteGraph /* OUT */,
+      SuiteRunnerMap suiteRunnerMap,
+      XmlSuite xmlSuite) {
+    ISuite parentSuiteRunner = suiteRunnerMap.require(xmlSuite);
+    suiteGraph.addNode(parentSuiteRunner);
+    if (!xmlSuite.getChildSuites().isEmpty()) {
+      for (XmlSuite childSuite : xmlSuite.getChildSuites()) {
+        suiteGraph.addEdge(0, parentSuiteRunner, suiteRunnerMap.require(childSuite));
+        populateSuiteGraph(suiteGraph, suiteRunnerMap, childSuite);
+      }
+    }
+  }
+
+  /**
+   * Creates the {@code SuiteRunner}s and populates the suite runner map with this information
+   *
+   * @param suiteRunnerMap Map with XMLSuite as key and it's respective SuiteRunner as value. This
+   *     is updated as part of this method call
+   * @param xmlSuite Xml Suite (and its children) for which {@code SuiteRunner}s are created
+   */
+  private void createSuiteRunners(SuiteRunnerMap suiteRunnerMap /* OUT */, XmlSuite xmlSuite) {
+    // If the skip flag was invoked on the command line, it
+    // takes precedence
+    if (null != m_skipFailedInvocationCounts) {
+      xmlSuite.setSkipFailedInvocationCounts(m_skipFailedInvocationCounts);
+    }
+
+    // Override the XmlSuite verbose value with the one from TestNG
+    if (m_verbose != null) {
+      xmlSuite.setVerbose(m_verbose);
+    }
+
+    if (null != m_configFailurePolicy) {
+      xmlSuite.setConfigFailurePolicy(m_configFailurePolicy);
+    }
+
+    if (null != m_dataProviderThreadCount) {
+      xmlSuite.setDataProviderThreadCount(m_dataProviderThreadCount);
+    }
+
+    Set<XmlMethodSelector> selectors = new HashSet<>();
+    for (XmlTest t : xmlSuite.getTests()) {
+      for (Map.Entry<String, Integer> ms : m_methodDescriptors.entrySet()) {
+        XmlMethodSelector xms = new XmlMethodSelector();
+        xms.setName(ms.getKey());
+        xms.setPriority(ms.getValue());
+        selectors.add(xms);
+      }
+      selectors.addAll(m_selectors);
+      t.getMethodSelectors().addAll(new ArrayList<>(selectors));
+    }
+
+    suiteRunnerMap.put(xmlSuite, createSuiteRunner(xmlSuite));
+
+    for (XmlSuite childSuite : xmlSuite.getChildSuites()) {
+      createSuiteRunners(suiteRunnerMap, childSuite);
+    }
+  }
+
+  /** Creates a suite runner and configures its initial state */
+  private SuiteRunner createSuiteRunner(XmlSuite xmlSuite) {
+    DataProviderHolder holder = new DataProviderHolder(m_configuration);
+    holder.addListeners(m_dataProviderListeners.values());
+    holder.addInterceptors(m_dataProviderInterceptors.values());
+    TestListenersContainer container =
+        new TestListenersContainer(getTestListeners(), this.exitCodeListener);
+    SuiteRunner result =
+        new SuiteRunner(
+            getConfiguration(),
+            xmlSuite,
+            m_outputDir,
+            m_testRunnerFactory,
+            m_useDefaultListeners,
+            m_methodInterceptors,
+            m_invokedMethodListeners.values(),
+            container,
+            m_classListeners.values(),
+            holder,
+            MethodSorting.basedOn());
+
+    result.addParameterResolvers(m_parameterResolvers.values());
+
+    for (ISuiteListener isl : m_suiteListeners.values()) {
+      result.addListener(isl);
+    }
+
+    for (IReporter r : result.getReporters()) {
+      maybeAddListener(m_reporters, r.getClass(), r, true);
+    }
+
+    for (IConfigurationListener cl : m_configuration.getConfigurationListeners()) {
+      result.addConfigurationListener(cl);
+    }
+
+    m_executionVisualisers.values().forEach(result::addListener);
+
+    return result;
+  }
+
+  protected IConfiguration getConfiguration() {
+    return m_configuration;
+  }
+
+  /**
+   * The TestNG entry point for command line execution.
+   *
+   * <p>Kept working so that {@code java -cp testng.jar org.testng.TestNG suite.xml} keeps behaving
+   * as before: it hands {@code argv} over to the {@link ITestNGCliRunner} found on the classpath.
+   *
+   * @param argv the TestNG command line parameters.
+   * @deprecated since 7.13. The command line front end now lives in its own modules; invoke {@code
+   *     org.testng.cli.jcommander.JCommanderCliRunner} (or any other {@link ITestNGCliRunner})
+   *     directly, or drive TestNG through its Java API. Scheduled for removal in 8.0.
+   */
+  @Deprecated
+  public static void main(String[] argv) {
+    TestNG testng;
+    try {
+      testng = privateMain(argv, null);
+    } catch (TestNGException ex) {
+      // Typically no ITestNGCliRunner on the classpath. Report it the way any other command line
+      // error is reported rather than as an uncaught stack trace.
+      exitWithError(ex.getMessage());
+      return;
+    }
+    System.exit(testng.getStatus());
+  }
+
+  /**
+   * <B>Note</B>: this method is not part of the public API and is meant for internal usage only.
+   *
+   * @param argv The param arguments
+   * @param listener The listener
+   * @return The TestNG instance
+   * @throws TestNGException when no {@link ITestNGCliRunner} implementation is on the classpath, or
+   *     when {@code argv} cannot be honoured. Unlike before 7.13, an unusable command line no
+   *     longer terminates the JVM here; only {@link #main(String[])} does that.
+   * @deprecated since 7.13. Use {@link ITestNGCliRunner#run(String[], ITestListener)} on the runner
+   *     of your choice. Scheduled for removal in 8.0.
+   */
+  @Deprecated
+  public static TestNG privateMain(String[] argv, @Nullable ITestListener listener) {
+    return CliRunners.required().run(argv, listener);
+  }
+
+  /**
+   * Configure the TestNG instance based on the command line parameters.
+   *
+   * @param cla The command line parameters
+   * @deprecated since 7.13. The command line front end lives in the {@code testng-cli} module; use
+   *     {@code org.testng.cli.CliConfigurer#configure(TestNG, org.testng.cli.CliOptions)}. This
+   *     method is frozen for the benefit of subclasses such as {@code RemoteTestNG} and will be
+   *     removed in 8.0.
+   */
+  @Deprecated
+  protected void configure(CommandLineArgs cla) {
+    Optional.ofNullable(cla.useGlobalThreadPool).ifPresent(this::shouldUseGlobalThreadPool);
+    Optional.ofNullable(cla.shareThreadPoolForDataProviders)
+        .ifPresent(this::shareThreadPoolForDataProviders);
+    Optional.ofNullable(cla.propagateDataProviderFailureAsTestFailure)
+        .ifPresent(value -> propagateDataProviderFailureAsTestFailure());
+    setReportAllDataDrivenTestsAsSkipped(cla.includeAllDataDrivenTestsWhenSkipping);
+    Optional.ofNullable(cla.emptyDataProviderBehavior)
+        .ifPresent(this::setEmptyDataProviderBehavior);
+
+    Optional.ofNullable(cla.listenerFactory)
+        .map(ClassHelper::forName)
+        .filter(ITestNGListenerFactory.class::isAssignableFrom)
+        .map(it -> m_objectFactory.newInstance(it))
+        .map(it -> (ITestNGListenerFactory) it)
+        .ifPresent(this::setListenerFactory);
+
+    Optional.ofNullable(cla.generateResultsPerSuite).ifPresent(this::setGenerateResultsPerSuite);
+
+    Optional.ofNullable(cla.listenerComparator)
+        .map(ClassHelper::forName)
+        .filter(ListenerComparator.class::isAssignableFrom)
+        .map(it -> m_objectFactory.newInstance(it))
+        .map(it -> (ListenerComparator) it)
+        .ifPresent(this::setListenerComparator);
+
+    if (cla.verbose != null) {
+      setVerbose(cla.verbose);
+    }
+    if (cla.dependencyInjectorFactoryClass != null) {
+      Class<?> clazz = ClassHelper.forName(cla.dependencyInjectorFactoryClass);
+      if (clazz != null && IInjectorFactory.class.isAssignableFrom(clazz)) {
+        m_configuration.setInjectorFactory(
+            m_objectFactory.newInstance((Class<IInjectorFactory>) clazz));
+      }
+    }
+    Optional.ofNullable(cla.threadPoolFactoryClass)
+        .map(ClassHelper::forName)
+        .filter(IExecutorServiceFactory.class::isAssignableFrom)
+        .map(it -> m_objectFactory.newInstance(it))
+        .map(it -> (IExecutorServiceFactory) it)
+        .ifPresent(this::setExecutorServiceFactory);
+
+    if (cla.outputDirectory != null) {
+      setOutputDirectory(cla.outputDirectory);
+    }
+
+    String testClasses = cla.testClass;
+    if (null != testClasses) {
+      List<Class<?>> classes = new ArrayList<>();
+      for (String c : Utils.splitCommaSeparated(testClasses)) {
+        classes.add(ClassHelper.fileToClass(c));
+      }
+
+      setTestClasses(classes.toArray(new Class[0]));
+    }
+
+    if (cla.testNames != null) {
+      setTestNames(Utils.splitCommaSeparated(cla.testNames));
+      setIgnoreMissedTestNames(cla.ignoreMissedTestNames);
+    }
+
+    // Note: can't use a Boolean field here because we are allowing a boolean
+    // parameter with an arity of 1 ("-usedefaultlisteners false")
+    if (cla.useDefaultListeners != null) {
+      setUseDefaultListeners("true".equalsIgnoreCase(cla.useDefaultListeners));
+    }
+
+    setGroups(cla.groups);
+    setExcludedGroups(cla.excludedGroups);
+    setTestJar(cla.testJar);
+    setXmlPathInJar(cla.xmlPathInJar);
+    setSkipFailedInvocationCounts(cla.skipFailedInvocationCounts);
+    toggleFailureIfAllTestsWereSkipped(cla.failIfAllTestsSkipped);
+    setListenersToSkipFromBeingWiredInViaServiceLoaders(
+        Utils.splitCommaSeparated(cla.spiListenersToSkip).toArray(new String[0]));
+
+    m_configuration.setOverrideIncludedMethods(cla.overrideIncludedMethods);
+
+    if (cla.parallelMode != null) {
+      setParallel(cla.parallelMode);
+    }
+    if (cla.configFailurePolicy != null) {
+      setConfigFailurePolicy(XmlSuite.FailurePolicy.getValidPolicy(cla.configFailurePolicy));
+    }
+    if (cla.threadCount != null) {
+      setThreadCount(cla.threadCount);
+    }
+    if (cla.dataProviderThreadCount != null) {
+      setDataProviderThreadCount(cla.dataProviderThreadCount);
+    }
+    if (cla.suiteName != null) {
+      setDefaultSuiteName(cla.suiteName);
+    }
+    if (cla.testName != null) {
+      setDefaultTestName(cla.testName);
+    }
+    if (cla.listener != null) {
+      String sep = ";";
+      if (cla.listener.contains(",")) {
+        sep = ",";
+      }
+      String[] strs = Utils.split(cla.listener, sep);
+      List<Class<? extends ITestNGListener>> classes = new ArrayList<>();
+
+      for (String cls : strs) {
+        Class<?> clazz = ClassHelper.fileToClass(cls);
+        if (ITestNGListener.class.isAssignableFrom(clazz)) {
+          classes.add((Class<? extends ITestNGListener>) clazz);
+        }
+      }
+
+      setListenerClasses(classes);
+    }
+
+    if (null != cla.methodSelectors) {
+      String[] strs = Utils.split(cla.methodSelectors, ",");
+      for (String cls : strs) {
+        String[] sel = Utils.split(cls, ":");
+        try {
+          if (sel.length == 2) {
+            addMethodSelector(sel[0], Integer.parseInt(sel[1]));
+          } else {
+            error("Method selector value was not in the format org.example.Selector:4");
+          }
+        } catch (NumberFormatException nfe) {
+          error("Method selector value was not in the format org.example.Selector:4");
+        }
+      }
+    }
+
+    if (cla.objectFactory != null) {
+      setObjectFactory(
+          (Class<? extends ITestObjectFactory>) ClassHelper.fileToClass(cla.objectFactory));
+    }
+    if (cla.testRunnerFactory != null) {
+      setTestRunnerFactoryClass(
+          (Class<? extends ITestRunnerFactory>) ClassHelper.fileToClass(cla.testRunnerFactory));
+    }
+
+    ReporterConfig reporterConfig = ReporterConfig.deserialize(cla.reporter);
+    if (reporterConfig != null) {
+      addReporter(reporterConfig);
+    }
+
+    if (!cla.commandLineMethods.isEmpty()) {
+      m_commandLineMethods = cla.commandLineMethods;
+    }
+
+    if (cla.suiteFiles != null) {
+      setTestSuites(cla.suiteFiles);
+    }
+
+    setSuiteThreadPoolSize(cla.suiteThreadPoolSize);
+    setRandomizeSuites(cla.randomizeSuites);
+    alwaysRunListeners(cla.alwaysRunListeners);
+  }
+
+  public void setIgnoreMissedTestNames(boolean ignoreMissedTestNames) {
+    m_ignoreMissedTestNames = ignoreMissedTestNames;
+  }
+
+  /**
+   * Restricts this run to the given fully qualified method names.
+   *
+   * <p>A {@code null} or empty list clears the restriction. An empty list must not be stored as is:
+   * {@code initializeCommandLineSuites} branches on the field being non-null, so an empty one would
+   * build a suite with no class and silently suppress {@link #setTestClasses(Class[])}.
+   *
+   * @param methods a list of fully qualified method names, as accepted by the {@code -methods}
+   *     command line option.
+   */
+  public void setCommandLineMethods(List<String> methods) {
+    m_commandLineMethods = methods == null || methods.isEmpty() ? null : new ArrayList<>(methods);
+  }
+
+  public void setOverrideIncludedMethods(boolean overrideIncludedMethods) {
+    m_configuration.setOverrideIncludedMethods(overrideIncludedMethods);
+  }
+
+  /**
+   * Reports a failure raised by {@link #run()} itself and records it, so that {@link #getStatus()}
+   * says the run failed even though no test result does.
+   *
+   * <p>A front end that would rather report a broken run as an exit status than let the exception
+   * propagate catches it and calls this. How much of the failure is printed depends on the current
+   * verbosity, which is why this lives here rather than in the caller.
+   *
+   * @param cause the failure raised by the run.
+   */
+  public void reportRunFailure(TestNGException cause) {
+    if (TestRunner.getVerbose() > 1) {
+      cause.printStackTrace(System.out);
+    } else {
+      error(cause.getMessage());
+    }
+    this.exitCode = ExitCode.newExitCodeRepresentingFailure();
+  }
+
+  public void setSuiteThreadPoolSize(Integer suiteThreadPoolSize) {
+    m_suiteThreadPoolSize = suiteThreadPoolSize;
+  }
+
+  public Integer getSuiteThreadPoolSize() {
+    return m_suiteThreadPoolSize;
+  }
+
+  public void setRandomizeSuites(boolean randomizeSuites) {
+    m_randomizeSuites = randomizeSuites;
+  }
+
+  public void alwaysRunListeners(boolean alwaysRun) {
+    m_alwaysRun = alwaysRun;
+  }
+
+  /**
+   * This method is invoked by Maven's Surefire, only remove it once Surefire has been modified to
+   * no longer call it.
+   *
+   * @param path The path
+   * @deprecated
+   */
+  @Deprecated
+  public void setSourcePath(String path) {
+    // nop
+  }
+
+  private static int parseInt(@Nullable Object value) {
+    if (value == null) {
+      return -1;
+    }
+    if (value instanceof String) {
+      return Integer.parseInt(String.valueOf(value));
+    }
+    if (value instanceof Integer) {
+      return (Integer) value;
+    }
+    throw new IllegalArgumentException("Unable to parse " + value + " as an Integer.");
+  }
+
+  /**
+   * This method is invoked by Maven's Surefire to configure the runner, do not remove unless you
+   * know for sure that Surefire has been updated to use the new configure(CommandLineArgs) method.
+   *
+   * @param cmdLineArgs The command line
+   * @deprecated use new configure(CommandLineArgs) method
+   */
+  @SuppressWarnings({"unchecked"})
+  @Deprecated
+  public void configure(Map cmdLineArgs) {
+    CommandLineArgs result = new CommandLineArgs();
+
+    int value = parseInt(cmdLineArgs.get(CommandLineArgs.LOG));
+    if (value != -1) {
+      result.verbose = value;
+    }
+    result.outputDirectory = (String) cmdLineArgs.get(CommandLineArgs.OUTPUT_DIRECTORY);
+
+    String testClasses = (String) cmdLineArgs.get(CommandLineArgs.TEST_CLASS);
+    if (null != testClasses) {
+      result.testClass = testClasses;
+    }
+
+    String testNames = (String) cmdLineArgs.get(CommandLineArgs.TEST_NAMES);
+    if (testNames != null) {
+      result.testNames = testNames;
+    }
+
+    String useDefaultListeners = (String) cmdLineArgs.get(CommandLineArgs.USE_DEFAULT_LISTENERS);
+    if (null != useDefaultListeners) {
+      result.useDefaultListeners = useDefaultListeners;
+    }
+
+    result.groups = (String) cmdLineArgs.get(CommandLineArgs.GROUPS);
+    result.excludedGroups = (String) cmdLineArgs.get(CommandLineArgs.EXCLUDED_GROUPS);
+    result.testJar = (String) cmdLineArgs.get(CommandLineArgs.TEST_JAR);
+    result.xmlPathInJar =
+        (String)
+            cmdLineArgs.getOrDefault(
+                CommandLineArgs.XML_PATH_IN_JAR, CommandLineArgs.XML_PATH_IN_JAR_DEFAULT);
+    result.mixed = (Boolean) cmdLineArgs.getOrDefault(CommandLineArgs.MIXED, false);
+    Object tmpValue = cmdLineArgs.get(CommandLineArgs.INCLUDE_ALL_DATA_DRIVEN_TESTS_WHEN_SKIPPING);
+    if (tmpValue != null) {
+      result.includeAllDataDrivenTestsWhenSkipping = Boolean.parseBoolean(tmpValue.toString());
+    }
+    Object emptyDpBehavior = cmdLineArgs.get(CommandLineArgs.EMPTY_DATA_PROVIDER_BEHAVIOR);
+    if (emptyDpBehavior != null) {
+      result.emptyDataProviderBehavior =
+          emptyDpBehavior instanceof EmptyDataProviderBehavior
+              ? (EmptyDataProviderBehavior) emptyDpBehavior
+              : EmptyDataProviderBehavior.valueOf(
+                  emptyDpBehavior.toString().toUpperCase(Locale.ROOT));
+    }
+    result.skipFailedInvocationCounts =
+        (Boolean) cmdLineArgs.get(CommandLineArgs.SKIP_FAILED_INVOCATION_COUNTS);
+    result.failIfAllTestsSkipped =
+        Boolean.parseBoolean(
+            cmdLineArgs.getOrDefault(CommandLineArgs.FAIL_IF_ALL_TESTS_SKIPPED, false).toString());
+    result.spiListenersToSkip =
+        (String) cmdLineArgs.getOrDefault(CommandLineArgs.LISTENERS_TO_SKIP_VIA_SPI, "");
+    String parallelMode = (String) cmdLineArgs.get(CommandLineArgs.PARALLEL);
+    if (parallelMode != null) {
+      result.parallelMode = XmlSuite.ParallelMode.getValidParallel(parallelMode);
+    }
+
+    value = parseInt(cmdLineArgs.get(CommandLineArgs.THREAD_COUNT));
+    if (value != -1) {
+      result.threadCount = value;
+    }
+
+    // Not supported by Surefire yet
+    value = parseInt(cmdLineArgs.get(CommandLineArgs.DATA_PROVIDER_THREAD_COUNT));
+    if (value != -1) {
+      result.dataProviderThreadCount = value;
+    }
+    String defaultSuiteName = (String) cmdLineArgs.get(CommandLineArgs.SUITE_NAME);
+    if (defaultSuiteName != null) {
+      result.suiteName = defaultSuiteName;
+    }
+
+    String defaultTestName = (String) cmdLineArgs.get(CommandLineArgs.TEST_NAME);
+    if (defaultTestName != null) {
+      result.testName = defaultTestName;
+    }
+
+    Object listeners = cmdLineArgs.get(CommandLineArgs.LISTENER);
+    if (listeners instanceof List) {
+      result.listener = Utils.join((List<?>) listeners, ",");
+    } else {
+      result.listener = (String) listeners;
+    }
+
+    String ms = (String) cmdLineArgs.get(CommandLineArgs.METHOD_SELECTORS);
+    if (null != ms) {
+      result.methodSelectors = ms;
+    }
+
+    String objectFactory = (String) cmdLineArgs.get(CommandLineArgs.OBJECT_FACTORY);
+    if (null != objectFactory) {
+      result.objectFactory = objectFactory;
+    }
+
+    String runnerFactory = (String) cmdLineArgs.get(CommandLineArgs.TEST_RUNNER_FACTORY);
+    if (null != runnerFactory) {
+      result.testRunnerFactory = runnerFactory;
+    }
+
+    String reporterConfigs = (String) cmdLineArgs.get(CommandLineArgs.REPORTER);
+    if (reporterConfigs != null) {
+      result.reporter = reporterConfigs;
+    }
+
+    String failurePolicy = (String) cmdLineArgs.get(CommandLineArgs.CONFIG_FAILURE_POLICY);
+    if (failurePolicy != null) {
+      result.configFailurePolicy = failurePolicy;
+    }
+
+    value = parseInt(cmdLineArgs.get(CommandLineArgs.SUITE_THREAD_POOL_SIZE));
+    if (value != -1) {
+      result.suiteThreadPoolSize = value;
+    }
+
+    String dependencyInjectorFactoryClass =
+        (String) cmdLineArgs.get(CommandLineArgs.DEPENDENCY_INJECTOR_FACTORY);
+    if (dependencyInjectorFactoryClass != null) {
+      result.dependencyInjectorFactoryClass = dependencyInjectorFactoryClass;
+    }
+
+    result.ignoreMissedTestNames =
+        Boolean.parseBoolean(
+            cmdLineArgs.getOrDefault(CommandLineArgs.IGNORE_MISSED_TEST_NAMES, false).toString());
+
+    result.generateResultsPerSuite =
+        Boolean.parseBoolean(
+            cmdLineArgs.getOrDefault(CommandLineArgs.GENERATE_RESULTS_PER_SUITE, false).toString());
+
+    Optional.ofNullable(cmdLineArgs.get(CommandLineArgs.LISTENER_COMPARATOR))
+        .map(Object::toString)
+        .ifPresent(it -> result.listenerComparator = it);
+
+    configure(result);
+  }
+
+  /** @param testNames Only run the specified tests from the suite. */
+  public void setTestNames(List<String> testNames) {
+    m_testNames = testNames;
+  }
+
+  public void setSkipFailedInvocationCounts(@Nullable Boolean skip) {
+    m_skipFailedInvocationCounts = skip;
+  }
+
+  /**
+   * Adds a reporter described the way the {@code -reporter} command line option does, for instance
+   * {@code com.acme.MyReporter:fileName=out.html}.
+   *
+   * <p>The class is resolved and instantiated synchronously. A {@code null} or empty value is
+   * silently ignored; a class that cannot be found is reported as a warning and skipped; a class
+   * that is found but does not implement {@link IReporter} raises a {@link TestNGException}.
+   *
+   * @param reporterConfigString the serialized reporter configuration.
+   * @throws TestNGException if the named class is not an {@link IReporter}.
+   */
+  public void addReporter(@Nullable String reporterConfigString) {
+    ReporterConfig reporterConfig = ReporterConfig.deserialize(reporterConfigString);
+    if (reporterConfig != null) {
+      addReporter(reporterConfig);
+    }
+  }
+
+  private void addReporter(ReporterConfig reporterConfig) {
+    IReporter instance = newReporterInstance(reporterConfig);
+    if (instance != null) {
+      addListener(instance);
+    } else {
+      LOGGER.warn("Could not find reporter class : " + reporterConfig.getClassName());
+    }
+  }
+
+  /** Creates a reporter based on the configuration */
+  private @Nullable IReporter newReporterInstance(ReporterConfig config) {
+
+    Class<?> reporterClass = ClassHelper.forName(config.getClassName());
+    if (reporterClass == null) {
+      return null;
+    }
+    if (!IReporter.class.isAssignableFrom(reporterClass)) {
+      throw new TestNGException(config.getClassName() + " is not a IReporter");
+    }
+
+    IReporter reporter = (IReporter) m_objectFactory.newInstance(reporterClass);
+
+    reporter.getConfig().setProperties(config.getProperties());
+
+    return reporter;
+  }
+
+  /**
+   * Double check that the command line parameters are valid.
+   *
+   * @param args The command line to check
+   * @deprecated since 7.13. Use {@code org.testng.cli.CliConfigurer#validate} from the {@code
+   *     testng-cli} module. Note that failures are now reported as {@link TestNGException} instead
+   *     of JCommander's {@code ParameterException}.
+   */
+  @Deprecated
+  protected static void validateCommandLineParameters(CommandLineArgs args) {
+    // What configure() will make of it, not the raw text: -testclass "" and -testclass " , ,"
+    // name no class at all, and selecting nothing has to be rejected here rather than produce a
+    // run with no classes and no complaint.
+    String testClasses = args.testClass;
+    if (testClasses != null && Utils.splitCommaSeparated(testClasses).isEmpty()) {
+      testClasses = null;
+    }
+    List<String> testNgXml = args.suiteFiles;
+    String testJar = args.testJar;
+    List<String> methods = args.commandLineMethods;
+
+    if (testClasses == null
+        && testJar == null
+        && (testNgXml == null || testNgXml.isEmpty())
+        && (methods == null || methods.isEmpty())) {
+      throw new TestNGException(
+          "You need to specify at least one testng.xml, one class" + " or one method");
+    }
+
+    String groups = args.groups;
+    String excludedGroups = args.excludedGroups;
+
+    if (testJar == null
+        && (null != groups || null != excludedGroups)
+        && testClasses == null
+        && (testNgXml == null || testNgXml.isEmpty())) {
+      throw new TestNGException("Groups option should be used with testclass option");
+    }
+  }
+
+  /** The outcome of the run; absent until {@link #run()} has produced one. */
+  private ExitCode requireExitCode() {
+    return Objects.requireNonNull(this.exitCode, "the run has not produced an exit code yet");
+  }
+
+  /** @return true if at least one test failed. */
+  public boolean hasFailure() {
+    return requireExitCode().hasFailure();
+  }
+
+  /** @return true if at least one test failed within success percentage. */
+  public boolean hasFailureWithinSuccessPercentage() {
+    return requireExitCode().hasFailureWithinSuccessPercentage();
+  }
+
+  /** @return true if at least one test was skipped. */
+  public boolean hasSkip() {
+    return requireExitCode().hasSkip();
+  }
+
+  static void exitWithError(@Nullable String msg) {
+    // Trimmed because TestNGException prefixes every message with a newline, which would show up
+    // as a stray blank line ahead of the error.
+    System.err.println(msg == null ? "" : msg.trim());
+    usage();
+    System.exit(1);
+  }
+
+  public String getOutputDirectory() {
+    return m_outputDir;
+  }
+
+  public IAnnotationTransformer getAnnotationTransformer() {
+    return m_annotationTransformer;
+  }
+
+  @SuppressWarnings("ReferenceEquality")
+  private void setAnnotationTransformer(IAnnotationTransformer t) {
+    // Identity on purpose: what is being reported is a second, different transformer replacing one
+    // the caller already installed. Re-installing the same instance is not a conflict, and a user
+    // type is free to declare two distinct transformers equal, which would hide a real one.
+    if (m_annotationTransformer != m_defaultAnnoProcessor && m_annotationTransformer != t) {
+      LOGGER.warn("AnnotationTransformer already set");
+    }
+    m_annotationTransformer = t;
+  }
+
+  /** @return the defaultSuiteName */
+  public String getDefaultSuiteName() {
+    return m_defaultSuiteName;
+  }
+
+  /** @param defaultSuiteName the defaultSuiteName to set */
+  public void setDefaultSuiteName(String defaultSuiteName) {
+    m_defaultSuiteName = defaultSuiteName;
+  }
+
+  /** @return the defaultTestName */
+  public String getDefaultTestName() {
+    return m_defaultTestName;
+  }
+
+  /** @param defaultTestName the defaultTestName to set */
+  public void setDefaultTestName(String defaultTestName) {
+    m_defaultTestName = defaultTestName;
+  }
+
+  /**
+   * Sets the policy for whether or not to ever invoke a configuration method again after it has
+   * failed once. See {@link org.testng.xml.XmlSuite.FailurePolicy} for what each value invalidates.
+   * The default value is {@link org.testng.xml.XmlSuite.FailurePolicy#SKIP}
+   *
+   * @param failurePolicy the configuration failure policy
+   */
+  public void setConfigFailurePolicy(XmlSuite.@Nullable FailurePolicy failurePolicy) {
+    m_configFailurePolicy = failurePolicy;
+  }
+
+  /**
+   * Returns the configuration failure policy.
+   *
+   * @return config failure policy
+   */
+  public XmlSuite.@Nullable FailurePolicy getConfigFailurePolicy() {
+    return m_configFailurePolicy;
+  }
+
+  // DEPRECATED: to be removed after a major version change
+  /**
+   * @return The default instance
+   * @deprecated since 5.1
+   */
+  @Deprecated
+  public static @Nullable TestNG getDefault() {
+    return m_instance;
+  }
+
+  @SuppressWarnings("ReferenceEquality")
+  private void setConfigurable(IConfigurable c) {
+    // Identity on purpose, for the reason given on setAnnotationTransformer.
+    if (m_configurable != null && m_configurable != c) {
+      LOGGER.warn("Configurable already set");
+    }
+    m_configurable = c;
+  }
+
+  @SuppressWarnings("ReferenceEquality")
+  private void setHookable(IHookable h) {
+    // Identity on purpose, for the reason given on setAnnotationTransformer.
+    if (m_hookable != null && m_hookable != h) {
+      LOGGER.warn("Hookable already set");
+    }
+    m_hookable = h;
+  }
+
+  public void setMethodInterceptor(IMethodInterceptor methodInterceptor) {
+    m_methodInterceptors.add(methodInterceptor);
+  }
+
+  public void setDataProviderThreadCount(int count) {
+    m_dataProviderThreadCount = count;
+  }
+
+  /**
+   * Add a class loader to the searchable loaders.
+   *
+   * @param loader The class loader to add
+   */
+  public void addClassLoader(final ClassLoader loader) {
+    if (loader != null) {
+      ClassHelper.addClassLoader(loader);
+    }
+  }
+
+  public void setPreserveOrder(boolean b) {
+    m_preserveOrder = b;
+  }
+
+  protected long getStart() {
+    return m_start;
+  }
+
+  protected long getEnd() {
+    return m_end;
+  }
+
+  public void setGroupByInstances(boolean b) {
+    m_groupByInstances = b;
+  }
+
+  /////
+  // ServiceLoader testing
+  //
+
+  private @Nullable URLClassLoader m_serviceLoaderClassLoader;
+  private final Map<Class<? extends ITestNGListener>, ITestNGListener> serviceLoaderListeners =
+      new HashMap<>();
+
+  /*
+   * Used to test ServiceClassLoader
+   */
+  public void setServiceLoaderClassLoader(URLClassLoader ucl) {
+    m_serviceLoaderClassLoader = ucl;
+  }
+
+  /*
+   * Used to test ServiceClassLoader
+   */
+  private void addServiceLoaderListener(ITestNGListener l) {
+    if (!serviceLoaderListeners.containsKey(l.getClass())) {
+      serviceLoaderListeners.put(l.getClass(), l);
+    }
+  }
+
+  /*
+   * Used to test ServiceClassLoader
+   */
+  public List<ITestNGListener> getServiceLoaderListeners() {
+    return new ArrayList<>(serviceLoaderListeners.values());
+  }
+
+  public void setInjectorFactory(IInjectorFactory factory) {
+    this.m_configuration.setInjectorFactory(factory);
+  }
+
+  /**
+   * @param factoryClass an {@link IInjectorFactory} implementation, instantiated with the object
+   *     factory currently in use.
+   */
+  public void setInjectorFactoryClass(Class<? extends IInjectorFactory> factoryClass) {
+    setInjectorFactory(m_objectFactory.newInstance(factoryClass));
+  }
+}

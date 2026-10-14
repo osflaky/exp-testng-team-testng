@@ -1,0 +1,404 @@
+package org.testng.internal.invokers;
+
+import static org.testng.ListenerComparator.sort;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import org.jspecify.annotations.Nullable;
+import org.testng.ClassMethodMap;
+import org.testng.IClassListener;
+import org.testng.IMethodInstance;
+import org.testng.ITestClass;
+import org.testng.ITestContext;
+import org.testng.ITestNGMethod;
+import org.testng.ITestResult;
+import org.testng.internal.BaseTestMethod;
+import org.testng.internal.ConfigurationGroupMethods;
+import org.testng.internal.IInstanceIdentity;
+import org.testng.internal.IParameterInfo;
+import org.testng.internal.ITestClassConfigInfo;
+import org.testng.internal.KeyAwareAutoCloseableLock;
+import org.testng.internal.RuntimeBehavior;
+import org.testng.internal.TestMethodComparator;
+import org.testng.internal.TestMethodContainer;
+import org.testng.internal.Utils;
+import org.testng.thread.IWorker;
+
+/**
+ * FIXME: reduce contention when this class is used through parallel invocation due to
+ * invocationCount and threadPoolSize by not invoking the @BeforeClass and @AfterClass which are
+ * already invoked on the original method.
+ *
+ * <p>This class implements Runnable and will invoke the ITestMethod passed in its constructor on
+ * its run() method.
+ */
+public class TestMethodWorker implements IWorker<ITestNGMethod> {
+
+  // Map of the test methods and their associated instances
+  // It has to be a set because the same method can be passed several times
+  // and associated to a different instance
+  private final List<IMethodInstance> m_methodInstances;
+  private final Map<String, String> m_parameters;
+  // There is one worker per test method, so a big @Factory suite holds a lot of these at once.
+  // Built on the first result rather than up front, since a worker that is still waiting to run
+  // has nothing to put in it. Only the thread running the worker adds to it.
+  private @Nullable List<ITestResult> m_testResults;
+  private final ConfigurationGroupMethods m_groupMethods;
+  private final @Nullable ClassMethodMap m_classMethodMap;
+  private final ITestContext m_testContext;
+  private final List<IClassListener> m_listeners;
+  private long currentThreadId;
+  private long threadIdToRunOn = -1;
+  private boolean completed = true;
+  private final ITestInvoker m_testInvoker;
+  private final IConfigInvoker m_configInvoker;
+
+  private static final KeyAwareAutoCloseableLock lock = new KeyAwareAutoCloseableLock();
+
+  public TestMethodWorker(
+      ITestInvoker testInvoker,
+      IConfigInvoker configInvoker,
+      List<IMethodInstance> testMethods,
+      Map<String, String> parameters,
+      ConfigurationGroupMethods groupMethods,
+      @Nullable ClassMethodMap classMethodMap,
+      ITestContext testContext,
+      List<IClassListener> listeners) {
+    this.m_testInvoker = testInvoker;
+    this.m_configInvoker = configInvoker;
+    m_methodInstances = testMethods;
+    m_parameters = parameters;
+    m_groupMethods = groupMethods;
+    m_classMethodMap = classMethodMap;
+    m_testContext = testContext;
+    m_listeners = listeners;
+  }
+
+  /**
+   * Retrieves the maximum specified timeout of all ITestNGMethods to be run.
+   *
+   * @return the max timeout or 0 if no timeout was specified
+   */
+  @Override
+  public long getTimeOut() {
+    long result = 0;
+    for (IMethodInstance mi : m_methodInstances) {
+      ITestNGMethod tm = mi.getMethod();
+      if (tm.getTimeOut() > result) {
+        result = tm.getTimeOut();
+      }
+    }
+
+    return result;
+  }
+
+  @Override
+  public String toString() {
+    StringBuilder result =
+        new StringBuilder(
+            "[Worker thread:"
+                + Thread.currentThread().getId()
+                + " priority:"
+                + getPriority()
+                + " ");
+
+    for (IMethodInstance m : m_methodInstances) {
+      result.append(m.getMethod()).append(" ");
+    }
+    result.append("]");
+
+    return result.toString();
+  }
+
+  /**
+   * Run all the ITestNGMethods passed in through the constructor.
+   *
+   * @see java.lang.Runnable#run()
+   */
+  @Override
+  public void run() {
+    this.currentThreadId = Thread.currentThread().getId();
+    if (RuntimeBehavior.enforceThreadAffinity()
+        && doesTaskHavePreRequisites()
+        && currentThreadId != threadIdToRunOn) {
+      completed = false;
+      return;
+    }
+
+    for (IMethodInstance testMethodInstance : m_methodInstances) {
+      ITestNGMethod testMethod = testMethodInstance.getMethod();
+      ITestClass testClassOfMethod = Utils.requireTestClassOf(testMethod);
+      Object key = IInstanceIdentity.getInstanceId(testMethod);
+
+      // For a lazy @Factory instance this is the just-in-time construction point. Trigger creation
+      // here so that a constructor failure is localized to this instance's method (reported as a
+      // skip carrying the constructor exception) instead of propagating out and aborting the run;
+      // the other instances of the same factory keep running.
+      testMethodInstance.getInstance();
+      Throwable instantiationFailure = lazyInstantiationFailure(testMethodInstance);
+      if (instantiationFailure != null) {
+        long start = System.currentTimeMillis();
+        ITestResult result =
+            m_testInvoker.registerSkippedTestResult(testMethod, start, instantiationFailure);
+        m_testInvoker.getNotifier().addSkippedTest(testMethod, result);
+        m_testInvoker.invokeListenersForSkippedTestResult(result, new InvokedMethod(start, result));
+        testResults().add(result);
+        continue;
+      }
+
+      if (canInvokeBeforeClassMethods()) {
+        try (KeyAwareAutoCloseableLock.AutoReleasable ignored = lock.lockForObject(key)) {
+          invokeBeforeClassMethods(testClassOfMethod, testMethodInstance);
+        }
+      }
+
+      // Invoke test method
+      try {
+        invokeTestMethods(testMethod, testMethod.getInstance());
+      } finally {
+        try (KeyAwareAutoCloseableLock.AutoReleasable ignored = lock.lockForObject(key)) {
+          invokeAfterClassMethods(testClassOfMethod, testMethodInstance);
+        }
+      }
+    }
+  }
+
+  private boolean doesTaskHavePreRequisites() {
+    return threadIdToRunOn != -1;
+  }
+
+  protected void invokeTestMethods(ITestNGMethod tm, @Nullable Object instance) {
+    // Potential bug here:  we look up the method index of tm among all
+    // the test methods (not very efficient) but if this method appears
+    // several times and these methods are run in parallel, the results
+    // are unpredictable...  Need to think about this more (and make it
+    // more efficient)
+    List<ITestResult> testResults =
+        m_testInvoker.invokeTestMethods(tm, m_groupMethods, instance, m_testContext);
+
+    if (testResults != null && !testResults.isEmpty()) {
+      testResults().addAll(testResults);
+    }
+  }
+
+  private boolean canInvokeBeforeClassMethods() {
+    return m_classMethodMap != null;
+  }
+
+  /** Invoke the @BeforeClass methods if not done already */
+  protected void invokeBeforeClassMethods(ITestClass testClass, IMethodInstance mi) {
+    // Guarded by canInvokeBeforeClassMethods().
+    Map<ITestClass, Set<Object>> invokedBeforeClassMethods =
+        Objects.requireNonNull(m_classMethodMap).getInvokedBeforeClassMethods();
+    Set<Object> instances =
+        invokedBeforeClassMethods.computeIfAbsent(testClass, key -> ConcurrentHashMap.newKeySet());
+    Object instance = mi.getInstance();
+    if (!instances.contains(instance)) {
+      instances.add(instance);
+      List<IClassListener> original =
+          sort(m_listeners, m_configInvoker.getConfiguration().getListenerComparator());
+      for (IClassListener listener : original) {
+        listener.onBeforeClass(testClass);
+      }
+      ConfigMethodArguments attributes =
+          new ConfigMethodArguments.Builder()
+              .forTestClass(testClass)
+              .usingConfigMethodsAs(
+                  ((ITestClassConfigInfo) testClass)
+                      .getInstanceBeforeClassMethods(instanceIdOf(mi)))
+              .forSuite(m_testContext.getSuite().getXmlSuite())
+              .usingParameters(m_parameters)
+              .usingInstance(instance)
+              .build();
+      m_configInvoker.invokeConfigurations(attributes);
+    }
+  }
+
+  /** Invoke the @AfterClass methods if not done already */
+  protected void invokeAfterClassMethods(ITestClass testClass, IMethodInstance mi) {
+    // if no BeforeClass than return immediately
+    // used for parallel case when BeforeClass were already invoked
+    if (m_classMethodMap == null) {
+      return;
+    }
+
+    //
+    // Invoke after class methods if this test method is the last one
+    //
+    List<IMethodInstance> invokeInstances = new ArrayList<>();
+    ITestNGMethod tm = mi.getMethod();
+    boolean removalSuccessful = m_classMethodMap.removeAndCheckIfLast(tm, mi.getInstance());
+    if (!removalSuccessful) {
+      return;
+    }
+    Map<ITestClass, Set<Object>> invokedAfterClassMethods =
+        m_classMethodMap.getInvokedAfterClassMethods();
+    Set<Object> instances =
+        invokedAfterClassMethods.computeIfAbsent(testClass, key -> new HashSet<>());
+    Object inst = mi.getInstance();
+    if (!instances.contains(inst)) {
+      invokeInstances.add(mi);
+    }
+
+    if (RuntimeBehavior.useSymmetricListenerExecution()) {
+      invokeAfterClassConfigurations(testClass, invokeInstances);
+      invokeListenersOnAfterClass(testClass, m_listeners);
+    } else {
+      invokeListenersOnAfterClass(testClass, m_listeners);
+      invokeAfterClassConfigurations(testClass, invokeInstances);
+    }
+  }
+
+  private void invokeAfterClassConfigurations(
+      ITestClass testClass, List<IMethodInstance> invokeInstances) {
+    for (IMethodInstance invokeInstance : invokeInstances) {
+      ConfigMethodArguments attributes =
+          new ConfigMethodArguments.Builder()
+              .forTestClass(testClass)
+              .forSuite(m_testContext.getSuite().getXmlSuite())
+              .usingParameters(m_parameters)
+              .usingInstance(invokeInstance.getInstance())
+              .usingConfigMethodsAs(
+                  ((ITestClassConfigInfo) testClass)
+                      .getInstanceAfterClassMethods(instanceIdOf(invokeInstance)))
+              .build();
+      m_configInvoker.invokeConfigurations(attributes);
+    }
+  }
+
+  /**
+   * @return - The per-instance id (UUID) associated with the given method instance, or {@code null}
+   *     when the method is not identity-aware (in which case the per-instance config lookup yields
+   *     none).
+   */
+  private static @Nullable UUID instanceIdOf(IMethodInstance mi) {
+    ITestNGMethod method = mi.getMethod();
+    return method instanceof IInstanceIdentity
+        ? ((IInstanceIdentity) method).getInstanceId()
+        : null;
+  }
+
+  /**
+   * @return - The throwable raised while lazily constructing the instance this method is bound to,
+   *     or {@code null} if there is none (eager instance, successful construction, or no factory).
+   */
+  private static @Nullable Throwable lazyInstantiationFailure(IMethodInstance mi) {
+    // A lazy-instantiation detail, so it is read from the internal factory metadata rather than
+    // from the public IFactoryInstance the method hands out.
+    ITestNGMethod method = mi.getMethod();
+    IParameterInfo info =
+        method instanceof BaseTestMethod
+            ? ((BaseTestMethod) method).getFactoryParameterInfo()
+            : null;
+    return info == null ? null : info.getInstantiationFailure();
+  }
+
+  private void invokeListenersOnAfterClass(ITestClass testClass, List<IClassListener> listeners) {
+    List<IClassListener> original =
+        sort(listeners, m_configInvoker.getConfiguration().getListenerComparator());
+    for (IClassListener listener : original) {
+      listener.onAfterClass(testClass);
+    }
+  }
+
+  // Identity on purpose, as far as anything here can say: nothing in TestNG calls this, and the
+  // one subclass, SingleTestMethodWorker below, does not either. Widening it to equals would make
+  // it answer a different index for two equal methods, with nothing in the tree to check that
+  // against. It is protected in an exported package, so deleting it is a separate decision.
+  @SuppressWarnings("ReferenceEquality")
+  protected int indexOf(ITestNGMethod tm, ITestNGMethod[] allTestMethods) {
+    for (int i = 0; i < allTestMethods.length; i++) {
+      if (allTestMethods[i] == tm) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  public List<ITestResult> getTestResults() {
+    return m_testResults == null ? Collections.emptyList() : m_testResults;
+  }
+
+  private List<ITestResult> testResults() {
+    if (m_testResults == null) {
+      m_testResults = new ArrayList<>();
+    }
+    return m_testResults;
+  }
+
+  @Override
+  public List<ITestNGMethod> getTasks() {
+    List<ITestNGMethod> result = new ArrayList<>();
+    for (IMethodInstance m : m_methodInstances) {
+      result.add(m.getMethod());
+    }
+    return result;
+  }
+
+  @Override
+  public int compareTo(IWorker<ITestNGMethod> other) {
+    if (m_methodInstances.isEmpty()) {
+      return 0;
+    }
+    List<ITestNGMethod> otherTasks = other.getTasks();
+    if (otherTasks.isEmpty()) {
+      return 0;
+    }
+    return TestMethodComparator.compareStatic(
+        m_methodInstances.get(0).getMethod(), otherTasks.get(0));
+  }
+
+  /** The priority of a worker is the priority of the first method it's going to run. */
+  @Override
+  public int getPriority() {
+    return !m_methodInstances.isEmpty() ? m_methodInstances.get(0).getMethod().getPriority() : 0;
+  }
+
+  @Override
+  public long getCurrentThreadId() {
+    return currentThreadId;
+  }
+
+  @Override
+  public void setThreadIdToRunOn(long threadIdToRunOn) {
+    this.threadIdToRunOn = threadIdToRunOn;
+  }
+
+  @Override
+  public boolean completed() {
+    return this.completed;
+  }
+}
+
+/** Extends {@code TestMethodWorker} and is used to work on only a single method instance */
+class SingleTestMethodWorker extends TestMethodWorker {
+  private static final ConfigurationGroupMethods EMPTY_GROUP_METHODS =
+      new ConfigurationGroupMethods(
+          new TestMethodContainer(() -> new ITestNGMethod[0]), new HashMap<>(), new HashMap<>());
+
+  public SingleTestMethodWorker(
+      TestInvoker testInvoker,
+      ConfigInvoker configInvoker,
+      IMethodInstance testMethod,
+      Map<String, String> parameters,
+      ITestContext testContext,
+      List<IClassListener> listeners) {
+    super(
+        testInvoker,
+        configInvoker,
+        Collections.singletonList(testMethod),
+        parameters,
+        EMPTY_GROUP_METHODS,
+        null,
+        testContext,
+        listeners);
+  }
+}

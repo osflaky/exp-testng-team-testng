@@ -1,0 +1,243 @@
+package org.testng.internal;
+
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Deque;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Objects;
+import java.util.Set;
+import org.jspecify.annotations.Nullable;
+import org.testng.ITestNGMethod;
+import org.testng.TestNGException;
+import org.testng.internal.collections.Pair;
+
+public class MethodInheritance {
+
+  /**
+   * A Custom comparator that helps in {@link ITestNGMethod} ordering keeping in mind the class
+   * hierarchy. Here's how the comparator works: <br>
+   * Lets say we have two method objects o1 and o2. <br>
+   * o1 is associated with MyClass and o2 is associated with AnotherClass.
+   *
+   * <ul>
+   *   <li>-1 is returned if MyClass is the parent of AnotherClass
+   *   <li>1 is returned if AnotherClass is the parent of MyClass
+   *   <li>0 is returned otherwise if MyClass and AnotherClass are the same i.e., both methods
+   *       belong to the same class.
+   * </ul>
+   *
+   * Working of isAssignableFrom <br>
+   * Lets say we have : <br>
+   *
+   * <ol>
+   *   <li>interface Oven
+   *   <li>Microwave implements Oven
+   * </ol>
+   *
+   * <ol>
+   *   <li>microwave instanceof Oven : <b>returns true</b>
+   *   <li>Oven.class.isAssignableFrom(microwave.getClass()) : <b>returns true</b>
+   * </ol>
+   */
+  private static final Comparator<ITestNGMethod> COMPARATOR =
+      (o1, o2) -> {
+        int result = -2;
+        Class<?> thisClass = o1.getRealClass();
+        Class<?> otherClass = o2.getRealClass();
+        if (thisClass.isAssignableFrom(otherClass)) {
+          result = -1;
+        } else if (otherClass.isAssignableFrom(thisClass)) {
+          result = 1;
+        } else if (o1.equals(o2)) {
+          result = 0;
+        }
+        return result;
+      };
+
+  /** Look in map for a class that is a superclass of methodClass */
+  private static @Nullable List<ITestNGMethod> findMethodListSuperClass(
+      Map<Class<?>, List<ITestNGMethod>> map, Class<? extends ITestNGMethod> methodClass) {
+    return map.entrySet().stream()
+        .parallel()
+        .filter(each -> each.getKey().isAssignableFrom(methodClass))
+        .map(Entry::getValue)
+        .findFirst()
+        .orElse(null);
+  }
+
+  /** Look in map for a class that is a subclass of methodClass */
+  private static @Nullable Class<?> findSubClass(
+      Map<Class<?>, List<ITestNGMethod>> map, Class<? extends ITestNGMethod> methodClass) {
+    return map.keySet().stream()
+        .parallel()
+        .filter(methodClass::isAssignableFrom)
+        .findFirst()
+        .orElse(null);
+  }
+
+  /**
+   * Fix the methodsDependedUpon to make sure that @Configuration methods respect inheritance
+   * (before methods are invoked in the order Base first and after methods are invoked in the order
+   * Child first)
+   *
+   * @param methods the list of methods
+   * @param before true if we are handling a before method (meaning, the methods need to be sorted
+   *     base class first and subclass last). false otherwise (subclass methods first, base classes
+   *     last).
+   */
+  public static void fixMethodInheritance(ITestNGMethod[] methods, boolean before) {
+    // Map of classes -> List of methods that belong to this class or same hierarchy
+    Map<Class<?>, List<ITestNGMethod>> map = new HashMap<>();
+
+    //
+    // Put the list of methods in their hierarchy buckets
+    //
+    for (ITestNGMethod method : methods) {
+      Class<? extends ITestNGMethod> methodClass = method.getRealClass();
+      List<ITestNGMethod> l = findMethodListSuperClass(map, methodClass);
+      if (null != l) {
+        l.add(method);
+      } else {
+        Class<?> subClass = findSubClass(map, methodClass);
+        List<ITestNGMethod> subClassMethods = subClass == null ? null : map.get(subClass);
+        if (null != subClassMethods) {
+          l = subClassMethods;
+          l.add(method);
+          map.remove(subClass);
+          map.put(methodClass, l);
+        } else {
+          l = new ArrayList<>();
+          l.add(method);
+          map.put(methodClass, l);
+        }
+      }
+    }
+
+    // Collect candidate inheritance edges from a snapshot of the explicit graph, then apply
+    // them sequentially with cycle detection. Hierarchy buckets used to be processed with
+    // parallelStream while canReach read edges another bucket was mutating, so two independent
+    // hierarchies could each see a safe edge and together form a cycle.
+    List<Pair<ITestNGMethod, ITestNGMethod>> candidates = new ArrayList<>();
+    map.values().stream()
+        .filter(l -> l.size() > 1)
+        .forEach(
+            l -> {
+              sortMethodsByInheritance(l, before);
+              for (int i = 0; i < l.size() - 1; i++) {
+                ITestNGMethod m1 = l.get(i);
+                for (int j = i + 1; j < l.size(); j++) {
+                  ITestNGMethod m2 = l.get(j);
+                  boolean notEffectivelyEqual = !equalsEffectiveClass(m1, m2);
+                  boolean upstreamHierarchy = hasUpstreamHierarchy(m1, m2);
+                  boolean shouldConsider =
+                      before ? notEffectivelyEqual && upstreamHierarchy : notEffectivelyEqual;
+                  // The explicit dependency graph decides whether a soft inheritance edge is
+                  // safe. Local groups / dependsOnGroups presence used to drop a valid
+                  // constraint when the child only had an unrelated groups= value.
+                  if (shouldConsider && !dependencyExists(m1, m2, methods)) {
+                    candidates.add(Pair.of(m2, m1));
+                  }
+                }
+              }
+            });
+
+    candidates.sort(
+        Comparator.comparing(
+                (Pair<ITestNGMethod, ITestNGMethod> edge) ->
+                    MethodHelper.calculateMethodCanonicalName(edge.first()))
+            .thenComparing(edge -> MethodHelper.calculateMethodCanonicalName(edge.second())));
+    for (Pair<ITestNGMethod, ITestNGMethod> edge : candidates) {
+      ITestNGMethod m2 = edge.first();
+      ITestNGMethod m1 = edge.second();
+      if (!dependencyExists(m1, m2, methods)) {
+        Utils.log("MethodInheritance", 4, m2 + " DEPENDS ON " + m1);
+        m2.addMethodDependedUpon(MethodHelper.calculateMethodCanonicalName(m1));
+      }
+    }
+  }
+
+  private static boolean hasUpstreamHierarchy(ITestNGMethod m1, ITestNGMethod m2) {
+    Class<?> c1 = m1.getRealClass();
+    Class<?> c2 = m2.getRealClass();
+    if (c1.equals(c2)) {
+      return false;
+    }
+    return c1.isAssignableFrom(c2);
+  }
+
+  private static boolean dependencyExists(
+      ITestNGMethod m1, ITestNGMethod m2, ITestNGMethod[] methods) {
+    return canReach(m1, m2, methods) || canReach(m2, m1, methods);
+  }
+
+  /**
+   * True when {@code target} is already a (possibly transitive) hard predecessor of {@code from}
+   * through {@code dependsOnMethods} / {@code dependsOnGroups}. A direct-only check would miss a
+   * mixed chain and let an inheritance edge close a cycle (GITHUB-2432).
+   */
+  private static boolean canReach(
+      ITestNGMethod from, ITestNGMethod target, ITestNGMethod[] methods) {
+    Deque<ITestNGMethod> stack = new ArrayDeque<>();
+    Set<ITestNGMethod> seen = new HashSet<>();
+    stack.push(from);
+    seen.add(from);
+    while (!stack.isEmpty()) {
+      ITestNGMethod current = stack.pop();
+      for (ITestNGMethod next : directDependencies(current, methods)) {
+        if (next.equals(target)) {
+          return true;
+        }
+        if (seen.add(next)) {
+          stack.push(next);
+        }
+      }
+    }
+    return false;
+  }
+
+  private static List<ITestNGMethod> directDependencies(
+      ITestNGMethod method, ITestNGMethod[] methods) {
+    List<ITestNGMethod> dependencies = new ArrayList<>();
+    if (method.getMethodsDependedUpon().length > 0) {
+      try {
+        Collections.addAll(dependencies, MethodHelper.findDependedUponMethods(method, methods));
+      } catch (TestNGException ignored) {
+        // Missing dependsOnMethods is reported by MethodHelper.sortMethods. Cycle detection
+        // must not replace that error by throwing from the inheritance walk.
+      }
+    }
+    for (String group : method.getGroupsDependedUpon()) {
+      Collections.addAll(
+          dependencies, MethodGroupsHelper.findMethodsThatBelongToGroup(method, methods, group));
+    }
+    return dependencies;
+  }
+
+  private static boolean equalsEffectiveClass(ITestNGMethod m1, ITestNGMethod m2) {
+    try {
+      Class<?> c1 = m1.getRealClass();
+      Class<?> c2 = m2.getRealClass();
+      return Objects.equals(c1, c2);
+    } catch (Exception ex) {
+      return false;
+    }
+  }
+
+  /**
+   * Given a list of methods belonging to the same class hierarchy, orders them from the base class
+   * to the child (if true) or from child to base class (if false)
+   */
+  private static void sortMethodsByInheritance(
+      List<ITestNGMethod> methods, boolean baseClassToChild) {
+    methods.sort(COMPARATOR);
+    if (!baseClassToChild) {
+      Collections.reverse(methods);
+    }
+  }
+}

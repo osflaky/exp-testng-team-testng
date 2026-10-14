@@ -1,0 +1,140 @@
+package test.cli;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import java.io.File;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.UUID;
+import java.util.function.Consumer;
+import org.testng.IInvokedMethod;
+import org.testng.IInvokedMethodListener;
+import org.testng.ITestResult;
+import org.testng.TestNG;
+import org.testng.TestNGException;
+import org.testng.annotations.BeforeMethod;
+import org.testng.annotations.DataProvider;
+import org.testng.annotations.Test;
+import org.testng.testhelper.CompiledCode;
+import org.testng.testhelper.JarCreator;
+import org.testng.testhelper.SimpleCompiler;
+import org.testng.testhelper.SourceCode;
+import org.testng.testhelper.TestClassGenerator;
+import org.testng.testhelper.TestNGSimpleClassLoader;
+import test.SimpleBaseTest;
+import test.cli.github1517.TestClassWithConfigFailureSample;
+import test.cli.github1517.TestClassWithConfigSkipAndFailureSample;
+import test.cli.github1517.TestClassWithConfigSkipSample;
+import test.cli.github2693.TestClassSample;
+
+public class CliTest extends SimpleBaseTest {
+  @BeforeMethod
+  public void clearThreadsInformation() {
+    TestClassSample.threads.clear();
+  }
+
+  @Test(dataProvider = "getScenarios", description = "GITHUB-2693")
+  public void ensureDataProviderCountCanBeOverridden(String scenario, Consumer<TestNG> selection) {
+    TestNG tng = new TestNG();
+    tng.setDataProviderThreadCount(2);
+    selection.accept(tng);
+    tng.run();
+    assertThat(TestClassSample.threads).withFailMessage(scenario).hasSize(2);
+  }
+
+  /**
+   * The three ways this run can be told what to execute. They do not share a code path: classes and
+   * methods pick the count up in {@code createCommandLineSuitesForClasses}, suites only in {@code
+   * createSuiteRunners}, which is where GITHUB-2693 was missing it. Hence one row each.
+   */
+  @DataProvider(name = "getScenarios")
+  public Object[][] getScenarios() {
+    Consumer<TestNG> suites =
+        tng -> tng.setTestSuites(Collections.singletonList("src/test/resources/xml/issue2693.xml"));
+    Consumer<TestNG> classes = tng -> tng.setTestClasses(new Class<?>[] {TestClassSample.class});
+    Consumer<TestNG> methods =
+        tng ->
+            tng.setCommandLineMethods(
+                Collections.singletonList(TestClassSample.class.getName() + ".test"));
+    return new Object[][] {
+      {"With Suites", suites}, {"With Classes", classes}, {"With Methods", methods}
+    };
+  }
+
+  @Test(dataProvider = "getData", description = "GITHUB-1517")
+  public void testExitCodeListenerBehavior(Class<?> clazz, int expectedStatus) {
+    TestNG testNG = create(clazz);
+    testNG.run();
+    assertThat(testNG.getStatus()).isEqualTo(expectedStatus);
+  }
+
+  @DataProvider
+  public Object[][] getData() {
+    return new Object[][] {
+      {TestClassWithConfigFailureSample.class, 3},
+      {TestClassWithConfigSkipSample.class, 2},
+      {TestClassWithConfigSkipAndFailureSample.class, 3}
+    };
+  }
+
+  @Test(description = "GITHUB-2761")
+  public void testToEnsureSuitesInJarAreExecutedViaCli() throws IOException {
+    SourceCode[] sources =
+        TestClassGenerator.generate("com.kungfu.panda", Arrays.asList("DragonWarrior", "Tigress"));
+    List<CompiledCode> compiledSources = SimpleCompiler.compileSourceCode(sources);
+    TestNGSimpleClassLoader classLoader =
+        new TestNGSimpleClassLoader(TestClassGenerator.getProjectDir());
+    Class<?>[] classes =
+        compiledSources.stream()
+            .map(compiledCode -> compile(classLoader, compiledCode))
+            .toArray(size -> new Class<?>[size]);
+    File jar = JarCreator.generateJar(classes);
+    LogInvocations logInvocations = new LogInvocations();
+    TestNG testng = new TestNG();
+    testng.addClassLoader(classLoader);
+    testng.setTestJar(jar.getAbsolutePath());
+    testng.addListener(logInvocations);
+    testng.setVerbose(2);
+    testng.run();
+    assertThat(testng.getStatus()).isEqualTo(0);
+    assertThat(logInvocations.logs)
+        .containsExactlyInAnyOrder(
+            "com.kungfu.panda.DragonWarrior.testMethod", "com.kungfu.panda.Tigress.testMethod");
+  }
+
+  @Test(description = "GITHUB-3230")
+  public void missingSuiteFileIsRejected() {
+    String missingSuite = "target/missing-suite-3230-" + UUID.randomUUID() + ".xml";
+    TestNG testng = new TestNG();
+    testng.setTestSuites(List.of(missingSuite));
+
+    assertThatThrownBy(testng::initializeSuitesAndJarFile)
+        .isInstanceOf(TestNGException.class)
+        .hasMessageContaining(missingSuite);
+  }
+
+  private static Class<?> compile(TestNGSimpleClassLoader loader, CompiledCode code) {
+    try {
+      return loader.injectByteCode(code);
+    } catch (ClassNotFoundException e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public static class LogInvocations implements IInvokedMethodListener {
+    private final List<String> logs = new ArrayList<>();
+
+    @Override
+    public void beforeInvocation(IInvokedMethod method, ITestResult testResult) {
+      logs.add(method.getTestMethod().getQualifiedName());
+    }
+
+    public List<String> getLogs() {
+      return logs;
+    }
+  }
+}

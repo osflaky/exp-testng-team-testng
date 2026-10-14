@@ -1,0 +1,392 @@
+# Working on TestNG
+
+Notes for coding agents, limited to what is easy to get wrong here. General contributor
+documentation lives in [`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md) and [`docs/`](docs/) —
+read those for the build model, the Java versions and the release process rather than assuming.
+
+Where this file contradicts the build, the build wins: fix the file.
+
+## Verification
+
+**`./gradlew build -x test` does not compile test sources.** It is a smoke check, never the gate.
+Checks that only fail once tests are compiled, or after a `clean`, slip straight through it — Error
+Prone rules that fire on test fixtures, formatter tasks that were up to date, dependency upgrades
+that break test code but not main.
+
+The gate is `./gradlew build`, the same task CI runs. Let Gradle decide how much of it to re-run:
+a change that reaches nothing finishes in seconds, so there is no need to judge by hand what a diff
+can affect. Add `clean` only to rule out stale output.
+
+Neither its exit code nor the result files prove anything on their own. An up-to-date run prints
+`BUILD SUCCESSFUL` without executing a single test; and while Gradle clears
+`build/test-results/test/` whenever the task *executes*, an up-to-date task does not execute, so the
+previous run's files survive and still read `0 failures`. Run the gate as one shape that answers
+both:
+
+```bash
+LOG="/tmp/testng-$(git branch --show-current | tr / -)-gate.log"   # parallel workspaces share /tmp
+rm -rf */build/test-results/test          # forces the task out of date, so the tests really run
+./gradlew --console=plain build > "$LOG" 2>&1; echo "EXIT=$?" >> "$LOG"
+grep -qE '^BUILD SUCCESSFUL' "$LOG" && grep -q '^EXIT=0' "$LOG" \
+  || { echo 'GATE INCONCLUSIVE'; grep -A10 'What went wrong' "$LOG"; exit 1; }
+grep -ho 'failures="[0-9]*"\|errors="[0-9]*"' */build/test-results/test/TEST-*.xml | sort | uniq -c
+```
+
+Redirect rather than pipe: a pipeline reports grep's status unless `pipefail` is set, and the log
+you need for the failure is gone either way. `EXIT=` goes in the log for the same reason — whatever
+reads the exit status of a backgrounded run sees the `echo`, which is the last process.
+
+`testng-core` hands the whole suite to every fork it starts (`maxParallelForks =
+availableProcessors() / 2`), so those counts are a multiple of the fork count. Read zeros and ratios
+from them, never an absolute total.
+
+When it fails, Gradle names the HTML report, but locating the test is quicker from the result files:
+
+```bash
+grep -l '<failure\|<error' */build/test-results/test/*.xml
+grep -o 'message="[^"]*"' testng-core/build/test-results/test/TEST-<the-class>.xml
+```
+
+**The gate is not the edit loop.** Letting Gradle skip work only helps when the change reaches
+little; anything in `testng-core-api` reaches everything, so every run costs the full five minutes.
+While iterating, run the tests that would actually fail if the change is wrong, and spend the five
+minutes once, before committing:
+
+```bash
+./gradlew :testng-core:test \
+  --tests "org.testng.xml.XmlRoundTripTest" \
+  --tests "test.xml.XmlVerifyTest" > /tmp/t.log 2>&1; echo "EXIT=$?" >> /tmp/t.log
+```
+
+Naming that set before editing is the point: it is the question the change has to answer. A run like
+the one above returns in seconds rather than minutes.
+
+Two things make a `--tests` set narrower or wider than it looks:
+
+- **It must include whatever supplies a dependency.** Filtering out the `<class>` that owns a group
+  while keeping a sibling that `dependsOnGroups` on it fails the whole task with `depends on
+  nonexistent group "<name>"` — behind dozens of lines still reading `0 failed`, so only the `BUILD`
+  line says anything is wrong. Open the `<test>` block your class sits in and pull in its siblings
+  whenever it uses `dependsOnGroups` or `dependsOnMethods`.
+- **A wildcard also collects nested classes.** An exact class name does not, but
+  `--tests "…issueNNNN.*"` picks up `IssueTest$Sample` alongside `IssueTest`, so a sample nested
+  inside its own test runs as a test in its own right — and a sample that fails on purpose then
+  reads as a failure of yours. Measured: exact filter one result file, wildcard two.
+
+**A new `testng-core` test class does not run until it is listed in
+`testng-core/src/test/resources/testng.xml`.** The task is suite-driven, not classpath-scanned, so
+an unregistered class is skipped by `build` without a word — the file can be committed and never
+execute — and `--tests` rejects it with `No tests found for given includes`, which reads like a
+typo in the filter. Register it in the same edit that creates it, next to its neighbours:
+`org.testng.xml.*` goes in `<test name="XML">`, `test.xml.*` in `<test name="Regression2">`. Then
+confirm it ran, rather than trusting the exit code:
+
+```bash
+CLASS=org.testng.xml.XmlRoundTripTest
+grep -o 'tests="[1-9][0-9]*"' "testng-core/build/test-results/test/TEST-$CLASS.xml"
+```
+
+Read that file only after a run you know executed — see the gate above.
+
+**A production object built by hand in a test is usually under-configured, and the test then passes
+vacuously.** `TestClass` asks its `ITestMethodFinder` for the configuration methods, and the finder
+answers only what a method selector included — so a bare `new RunInfo(() -> xmlTest)` registers no
+selector, `RunInfo.includeMethod` (`testng-core/src/main/java/org/testng/internal/RunInfo.java:37`)
+never enters its loop and returns the `false` it started with. Every category then comes back empty,
+for a reason that looks nothing like the cause. `TestRunner.initRunInfo`
+(`testng-core/src/main/java/org/testng/TestRunner.java:414`) does the missing half at lines 424 and
+426. Diff the fixture against the production call site of whatever it builds:
+`TestClassConfigurationLookupTest#newRunInfo` exists only to reproduce those two lines, and says so.
+
+**An expectation derived by reading records your assumption, not the behaviour.** In that same test
+`getBeforeClassMethods()` was asserted to carry one entry per `@Factory` instance; it carries one.
+`TestClass.initMethods` assigns the field inside the per-instance loop and stores a copy per id
+(`TestClass.java:235-238`), so only the last instance survives and the per-instance lists are what
+`getInstanceBeforeClassMethods` answers. For anything pinning existing behaviour, run it first and
+paste what it answered.
+
+**The test doubles here have a settled shape.** `org.mockito:mockito-core` is declared at
+`testng-core/testng-core-build.gradle.kts:37`, so counting calls on a real collaborator is a wrapper
+rather than a hand-written spy: `mock(Iface.class, delegatesTo(real))`, then `verify(...)`, which
+defaults to exactly once, and `verifyNoMoreInteractions(...)` to close the set. A fake implementing
+`IClass`/`ITestClass`/`IObject` follows `FakeTestClass` and `MethodInstanceTest.TestClassStub` —
+deprecated members carry `@SuppressWarnings("deprecation")` rather than `@Deprecated`, since on a
+fake the annotation buys nothing and makes `InlineMeSuggester` fire, and the deprecated accessor
+delegates to the live one. A method the fake is never asked for throws
+`UnsupportedOperationException("not reached while building a TestClass")` instead of a plausible
+empty value, so the load-bearing surface stands out.
+
+**Any number that reaches a commit message or a pull request comes from `--rerun-tasks`.** Error
+Prone and NullAway see only the units javac recompiles, so an incremental run both hides errors and
+invents them: on one package marking, three checks passed incrementally and failed under
+`--rerun-tasks`, and one of those failures was itself spurious. Forcing only the tasks that matter —
+`:testng-core-api:compileJava --rerun :testng-core:compileJava --rerun` — is much cheaper than
+`--rerun-tasks` over the whole graph, and just as forcing for those units.
+
+A green local build is not a green CI. Pull requests against `master` also run an OpenRewrite check
+that `.github/CONTRIBUTING.md` documents, and a wrapper validation. Pushes are weaker than they
+look: the `branches: ['*']` filter in `test.yml` does not match `/`, so pushing a branch named
+`docs/foo` triggers no build until a pull request exists.
+
+`verifyPublishedPomDependencies` (in `testng/testng-build.gradle.kts`, wired into `check`) pins the
+exact dependency set of the published pom, versions ignored. When it fails, either the change is
+wrong or the expected list needs updating — decide which, do not just update the list.
+
+## Declaring a package null-marked
+
+How the check is scoped is documented where it is configured, in
+`build-logic/code-quality/src/main/kotlin/testng.errorprone.gradle.kts`. What that comment cannot
+say is that a green build proves nothing on its own: it is also what an unchecked package looks
+like.
+
+Several of the main packages span several modules, and there the placement decides the coverage.
+Module A's `package-info.class` reaches B's compile classpath only if B depends on A, so putting the
+file on the wrong side leaves the other half compiling **unchecked**.
+
+Prove the coverage per module traversed, not once per package. Drop a throwaway
+
+```java
+private static Object nullAwayProbe() { return null; }
+```
+
+into one file of **each** module the package lives in, and compile those modules. Before the
+`package-info.java` every probe must compile clean; after it every probe must fail with
+`[NullAway] returning @Nullable expression from method with @NonNull return type`. A probe that
+still passes marks a half that is not under the check, and the error count for that package means
+nothing until it does.
+
+`@NullMarked` does not descend into sub-packages: `org.testng.internal.thread.graph` was marked long
+before `org.testng.internal.thread`.
+
+## Layout
+
+Modules are listed in `settings.gradle.kts`; only `:testng` is published, as a shaded jar merging
+the others. `docs/BUILD_SYSTEM.md` describes the structure.
+
+Before writing documentation, read what is already in `docs/` and `.github/`. Most build topics are
+covered there; a second copy drifts from the first, and this file was itself written as a fifth copy
+before being cut back to links.
+
+Three things that are not documented elsewhere and cost tool calls to discover:
+
+- Per-project build files are named `<module>/<module>-build.gradle.kts`, not `build.gradle.kts`.
+- Build logic lives in two included builds: `build-logic-commons/` builds the plugins that
+  `build-logic/` uses. Conventions are precompiled script plugins,
+  `build-logic/*/src/main/kotlin/testng.*.gradle.kts` — prefer changing a convention over repeating
+  configuration per module.
+- **Size package-scoped work by the package union, never by module.** A package is not confined to
+  one module: ten span two or more, `org.testng.internal` across four (core, core-api, runner-api,
+  yaml). Where a `package-info.java` annotation then lands decides which half is covered — see
+  *Declaring a package null-marked* below.
+
+The `guice` and `yaml` optional features are hand-rolled rather than declared with
+`registerFeature`; the reasoning is in the KDoc of
+`build-logic/jvm/src/main/kotlin/buildlogic/OptionalFeatureVariants.kt`. If you touch them, check
+the published pom and Gradle Module Metadata are unchanged.
+
+## Changing the build JDK
+
+`docs/JAVA_VERSIONS_QUICK_REFERENCE.md` explains the three Java versions. Read the current values
+rather than assuming them:
+
+```bash
+grep -E '^jdkBuildVersion|^targetJavaVersion' gradle.properties
+```
+
+The ambient `java` is whatever the version manager resolved for the session, not necessarily what
+the build wants. With `mise`, derive it from the property so it stays correct across bumps:
+
+```bash
+export JAVA_HOME="$(mise where java@$(sed -n 's/^jdkBuildVersion=//p' gradle.properties))"
+```
+
+This needs the `java@<N>` alias to point at an installed version; `mise where` fails otherwise.
+
+The root `gradle.properties` drives local builds, but it is **not** the only place the build JDK
+appears. Moving it means updating all of:
+
+- `gradle.properties`
+- the fallback defaults in `build-logic/build-parameters/build.gradle.kts`
+- the fallbacks in `build-logic-commons/gradle-plugin/build.gradle.kts` and its
+  `build-logic.kotlin-dsl-gradle-plugin.gradle.kts` (that build is configured before the root
+  properties are available, so it reads them from disk)
+- `.github/workflows/` — `test.yml` passes `jdkBuildVersion` as a Gradle property, which
+  **overrides** `gradle.properties`, and the publish workflows pin the JDK they install
+
+Bytecode is produced with `--release targetJavaVersion`, so the launching JDK does not leak into the
+artifacts. Gradle itself needs JDK 17+; the build then resolves a `jdkBuildVersion` toolchain,
+auto-detected or auto-provisioned. Where no matching JDK is available and auto-provisioning is off
+(as in CI), the failure is `Cannot find a Java installation on your machine ... matching:
+{languageVersion=N, ...}`.
+
+## Dependencies
+
+- Everything reachable from `:testng-core` ends up in the shaded jar, and any third-party dependency
+  it pulls lands in the published pom. Treat major bumps as API decisions and check the pom diff.
+- `targetJavaVersion` blocks some upgrades outright — Gradle says so plainly, e.g. *"only compatible
+  with JVM runtime version 17 or newer"*. Those are tracked for the next major release.
+- Dependabot covers `github-actions` and `gradle`. Actions are pinned to a commit SHA with the
+  version as a trailing comment; keep that shape, and check the SHA really is the tag it claims.
+- A version that must not be taken belongs in `ignore` in `.github/dependabot.yml`, with the reason
+  written there. Closing the pull request alone makes it come back.
+
+## Git
+
+The canonical repository is `testng-team/testng`. When working from a fork, its `master` is often
+behind, so diff, branch and rebase against the canonical remote — reasoning from a stale `master`
+produces confident, wrong analysis. Check before starting:
+
+```bash
+git remote -v                                  # which remote is canonical?
+git fetch <canonical> master
+git rev-list --count HEAD..<canonical>/master  # 0 means you are current
+```
+
+From a fork, pull requests are cross-fork:
+
+```bash
+gh pr create --repo testng-team/testng --base master --head <fork-owner>:<branch>
+```
+
+Conventional Commits. Record user-visible changes in `CHANGES.txt`, newest first, under the current
+version heading.
+
+A change under `org.testng.internal` earns two `CHANGES.txt` entries: the `Changed:` line in prose,
+and a bullet under `Possible backward incompatible changes:` naming what stops compiling and what to
+use instead. The package is OSGi exported yet excluded from javadoc, which reads as a contradiction
+and invites deprecated bridges; the project does the opposite, breaking them and recording it, each
+entry naming the export and doing it anyway. Grep `CHANGES.txt` for `internal` before arguing
+about compatibility — the precedents are the argument.
+
+Split a pull request that mixes a large mechanical sweep with changes that need judgement. The two
+halves have different review costs: a tool's output — an OpenRewrite run, a formatter pass, a
+rename across hundreds of files — is re-derivable from the recipe that produced it and needs little
+more than green CI, while the design decisions around it need a maintainer's attention. Bundled,
+the small half queues behind the large one and a reviewer becomes the bottleneck for both.
+
+Send the mechanical half first, then stack the reviewed half on its branch:
+
+```bash
+gh pr create --repo testng-team/testng --base <mechanical-branch> --head <fork-owner>:<branch>
+```
+
+The pull request then shows only the delta, and GitHub retargets it to `master` when the first one
+merges. Within each pull request, keep the machine output in its own commit, separate from the hand
+edits that follow it, so a reviewer can tell which hunks a human actually judged.
+
+- **Chain staging to the commit**: `git add <paths> && git commit …`. `git add` aborts the whole
+  invocation on one bad path — a file already removed with `git rm`, say — so nothing is staged,
+  and a bare `git commit` afterwards still succeeds on whatever the index already held. The result
+  is a commit that is not the one the message describes.
+- **Never `git stash` and switch branches just to look at another commit.** Forgetting the `pop` is
+  easy, and the tree then reads as it was before your edits — which looks exactly like your work
+  having vanished rather than like a stash. `git worktree add ../measure <ref>` answers the question
+  without touching what you hold, and when an amend is coming anyway, committing first leaves
+  nothing to stash.
+- **`git stash push -- <path>` on a path with no local changes creates nothing.** It says so — "No
+  local changes to save" — and leaves the stack untouched; but the stack is global while the push
+  was scoped, so the `git stash pop` written on the next line dequeues whatever was already on it:
+  another branch's work, spread through the tree as conflicts. Twenty-one files, here, while probing
+  a file that was committed and therefore unmodified. `git stash list` names the branch each entry
+  was made on, which is the giveaway. To instrument a committed file, save the blob instead —
+  `git show HEAD:<path> > /tmp/probe`, edit, copy back — which works whether the file has local
+  changes or not. Git does not drop an entry it could not apply cleanly, so a conflicted pop loses
+  nothing of the other branch's.
+- **Read `git ls-remote` when you start on an already-pushed branch, not when you push.** A branch
+  can be rebased from another workspace between two of your turns; finding out at push time means
+  the rebase, the gate and the summary were all spent against a base that had moved. Compare trees,
+  not shas — a server-side rebase gives a different sha for identical content, so
+  `git diff <remote-sha> HEAD` is the question that matters. If it shows only the hunks you added
+  since, your branch is a strict superset and forcing is safe.
+- **Publish deltas and zeros in durable text, not absolute counts.** Upstream moves fast enough that
+  an `8 → 6` in a commit message is stale by the next rebase and has to be remeasured; `−82`,
+  `0 failures, 0 errors` and "down to zero" survive it.
+
+## Working style
+
+- **Verify claims before acting on them** — including your own. A pull request description, an issue
+  comment, a memory or a conclusion from an earlier session are all hearsay until re-checked against
+  whatever settles them: the build for anything about this repository, the registry or upstream
+  release notes for anything about a dependency. A release date costs a minute to check; acting on a
+  wrong premise costs hours. This has already caused one full migration to be written and reverted,
+  and one obsolete memory to be copied into a committed file.
+- Running a documented command proves it executes, not that it does what the text claims. If the
+  text promises an effect — filtering, failing, producing a value — measure that effect.
+- Report what you actually observed. If a run was flaky, say so and show both runs.
+- **What the characterization made fail is the minimum the fix has to cover.** A `CHANGES.txt`
+  entry that has to disclaim part of it — "not covered until X migrates" — is the tell that the fix
+  sits too high. Count the failing sites, then enumerate the callers of the shared primitive one
+  level down. On GITHUB-2830 that primitive was `Utils.toString`, located by its already-failsafe
+  sibling `Utils.buildStackTrace`; guarding it covered all three lost reports and left the caller
+  unchanged.
+- When an upgrade is refused, record the error that refused it, so the next person does not retry it
+  blind.
+- **Edit prose before `autostyleApply`, not after.** The formatter rewraps javadoc, so a scripted
+  replacement written against the pre-format text silently stops matching. When patching after a
+  format pass, re-read the exact lines with `sed -n '<a>,<b>p'` rather than reusing the string you
+  wrote earlier.
+- **An absolute claim about the repository is paid for with a command, before it is written.**
+  "the only caller", "no other test", "all three", "two of the six" — each is one grep, and each
+  one written from memory has been wrong. Sweep what is about to be committed:
+
+  ```bash
+  git diff --cached -U0 | grep -nE \
+    '^\+.*\b(only|no other|nothing else|never|always|every|all|[0-9]+ of|the (two|three))\b'
+  ```
+
+  Every hit needs the command that settles it, run in this session, before the commit lands.
+- **Say the ordering out loud before spending the first gate.** A gate is five minutes, so a review
+  or `/simplify` round that arrives after it buys another one. When a cleanup pass is plausible,
+  propose "guard set, then the review, then one gate" up front: the cost is yours to know, not the
+  reader's to guess.
+
+## Writing
+
+These rules cover javadoc, code comments, commit messages, and issue and pull request text. They
+apply whether a person or a tool wrote it. They come from ASD-STE100, trimmed to what this codebase
+needs. `vale` checks what a machine can check, and a reviewer catches the rest.
+[`docs/WRITING_STYLE.md`](docs/WRITING_STYLE.md) explains how the tooling works, how to switch a rule
+off, and what it cannot reach.
+
+Keep the domain words. A TestNG reader needs `annotation`, `listener`, `suite` and `data provider`,
+and STE allows words like these as technical names. Cut ordinary English that is longer or vaguer
+than it needs to be.
+
+Everywhere:
+
+- One idea per sentence. Instructions: 20 words. Descriptions: 25. A reviewer checks this, because
+  `vale` cannot measure sentence length inside Java comments.
+- Active voice, and name who acts. "The listener reads the suite", not "the suite is read".
+- Present tense for behavior. Past tense only for what already happened.
+- The same word for the same thing, every time. No synonyms for variety.
+- Keep the articles. "the suite", not "suite".
+- Turn three or more related points into a list, not a paragraph.
+- Spell out an abbreviation the first time in a file.
+
+<!-- vale off -->
+- No filler: simply, basically, essentially, obviously, of course, note that, in order to.
+- No sales words: powerful, robust, seamless, leverage, comprehensive.
+- Plain verbs: use not utilize, start not initiate, end not terminate, help not facilitate.
+- American spelling: behavior, initialize, normalize. The Java API already spells it that way.
+<!-- vale on -->
+
+Javadoc is stricter, because users read it on javadoc.io:
+
+- **Start with a summary sentence.** `/** @return The status of this result. */` renders with an
+  empty description. Write the summary first, then the tags.
+- **Put every identifier in `{@code}` or `{@link}`.** A bare `paramIndex` looks like a typo, and
+  the spell checker reports it as one. Wrap it and Vale skips it, and it renders as code.
+- Call the reader "you". That is how our javadoc already reads, and it is fine.
+- No first person, no contractions, no `TODO`. Keep those in `//` comments. `vale` cannot tell the
+  two apart in Java, so a reviewer checks this one.
+- Do not point at a position. "the constants above" breaks as soon as someone reorders the file.
+
+Comments that start with `//` are looser. First person, contractions and `TODO` are all fine. Say
+what the code does and why, in whatever wording reads clearly.
+
+Check what this branch touched, or the whole repository:
+
+```bash
+./gradlew writingStyleCheckChanges          # what you are about to commit
+./gradlew writingStyleCheck                 # everything; add -PfailOnWritingStyle=true to make either fail
+```

@@ -1,0 +1,148 @@
+package org.testng.internal.invokers;
+
+import static org.testng.internal.Parameters.MethodParameters;
+
+import java.util.Collection;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import org.jspecify.annotations.Nullable;
+import org.testng.DataProviderHolder;
+import org.testng.IDataProviderMethod;
+import org.testng.IParameterResolver;
+import org.testng.ITestContext;
+import org.testng.ITestNGMethod;
+import org.testng.ITestObjectFactory;
+import org.testng.ITestResult;
+import org.testng.internal.Parameters;
+import org.testng.internal.TestResult;
+import org.testng.internal.Utils;
+import org.testng.internal.annotations.IAnnotationFinder;
+import org.testng.util.Strings;
+import org.testng.xml.XmlSuite;
+
+class ParameterHandler {
+  private final @Nullable ITestObjectFactory objectFactory;
+  private final IAnnotationFinder finder;
+  private final DataProviderHolder holder;
+  private final Collection<IParameterResolver> parameterResolvers;
+  private int verbose;
+
+  ParameterHandler(
+      @Nullable ITestObjectFactory objectFactory,
+      IAnnotationFinder finder,
+      DataProviderHolder holder,
+      Collection<IParameterResolver> parameterResolvers,
+      int verbose) {
+    this.objectFactory = objectFactory;
+    this.finder = finder;
+    this.holder = holder;
+    this.parameterResolvers = parameterResolvers;
+    this.verbose = verbose;
+  }
+
+  ParameterBag createParameters(
+      ITestNGMethod testMethod,
+      Map<String, String> parameters,
+      Map<String, String> allParameterNames,
+      ITestContext testContext) {
+    return createParameters(testMethod, parameters, allParameterNames, testContext, null);
+  }
+
+  ParameterBag createParameters(
+      ITestNGMethod testMethod,
+      Map<String, String> parameters,
+      Map<String, String> allParameterNames,
+      ITestContext testContext,
+      @Nullable Object fedInstance) {
+    return handleParameters(
+        testMethod,
+        testMethod.getInstance(),
+        allParameterNames,
+        parameters,
+        testContext,
+        fedInstance);
+  }
+
+  private ParameterBag handleParameters(
+      ITestNGMethod testMethod,
+      @Nullable Object instance,
+      Map<String, String> allParameterNames,
+      Map<String, String> parameters,
+      ITestContext testContext,
+      @Nullable Object fedInstance) {
+    XmlSuite suite = testContext.getCurrentXmlTest().getSuite();
+    try {
+      MethodParameters methodParams =
+          MethodParameters.newInstance(parameters, testMethod, testContext);
+      ParameterHolder paramHolder =
+          Parameters.handleParameters(
+              Objects.requireNonNull(objectFactory, "no object factory is configured"),
+              testMethod,
+              allParameterNames,
+              instance,
+              methodParams,
+              suite,
+              finder,
+              fedInstance,
+              holder,
+              Parameters.TEST_ANNOTATION,
+              parameterResolvers);
+      return new ParameterBag(paramHolder);
+    } catch (Throwable cause) {
+      if (verbose >= 2) {
+        String msg =
+            Utils.longStackTrace(cause.getCause() != null ? cause.getCause() : cause, true);
+        if (Strings.isNotNullAndNotEmpty(msg)) {
+          Utils.error(msg);
+        }
+      }
+
+      ITestResult result = TestResult.newTestResultWithCauseAs(testMethod, testContext, cause);
+
+      boolean bubbleUpFailure =
+          Optional.ofNullable(testMethod.getDataProviderMethod())
+              .map(IDataProviderMethod::propagateFailureAsTestFailure)
+              .orElse(false);
+      return new ParameterBag(result, bubbleUpFailure);
+    }
+  }
+
+  /**
+   * This class holds a {@code ParameterHolder} or in case of an error, a non-null {@code
+   * TestResult} containing the cause
+   */
+  static class ParameterBag {
+    final @Nullable ParameterHolder parameterHolder;
+    final @Nullable ITestResult errorResult;
+    boolean bubbleUpFailures = false;
+
+    ParameterBag(ParameterHolder parameterHolder) {
+      this.parameterHolder = parameterHolder;
+      this.errorResult = null;
+    }
+
+    ParameterBag(ITestResult errorResult, boolean bubbleUpFailures) {
+      this.parameterHolder = null;
+      this.errorResult = errorResult;
+      this.bubbleUpFailures = bubbleUpFailures;
+    }
+
+    boolean hasErrors() {
+      return errorResult != null;
+    }
+
+    boolean runInParallel() {
+      if (parameterHolder == null
+          || parameterHolder.origin != ParameterHolder.ParameterOrigin.ORIGIN_DATA_PROVIDER) {
+        return false;
+      }
+      IDataProviderMethod dataProvider = parameterHolder.dataProviderHolder;
+      return dataProvider != null && dataProvider.isParallel();
+    }
+
+    boolean isBubbleUpFailures() {
+      return bubbleUpFailures;
+    }
+  }
+}

@@ -1,0 +1,60 @@
+package test.failedreporter.issue2517;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
+import org.testng.TestNG;
+import org.testng.annotations.AfterMethod;
+import org.testng.annotations.BeforeMethod;
+import org.testng.annotations.Test;
+import test.SimpleBaseTest;
+
+public class DataProviderWithFactoryFailedReporterTest extends SimpleBaseTest {
+  private File mTempDirectory;
+
+  @BeforeMethod
+  public void setUp() {
+    mTempDirectory = createDirInTempDir("testng-tmp-" + System.currentTimeMillis() % 1000);
+  }
+
+  @AfterMethod
+  public void tearDown() {
+    deleteDir(mTempDirectory);
+  }
+
+  /**
+   * The failing instance is still named, but on the attribute that means "factory instance". {@code
+   * f1} has no data provider of its own, so it has no invocation number to record -- writing the
+   * factory index into {@code invocation-numbers} produced a suite TestNG could not read back.
+   */
+  @Test
+  public void failedMethodWithDataProviderAndFactoryShouldNameTheFailedInstance() {
+    testFailedReporter(
+        new String[] {"f1"},
+        "<include name=\"%s\" factory-instances=\"1\"/>",
+        DataProviderWithFactoryFailedReporterSample.class);
+  }
+
+  private void testFailedReporter(String[] expectedMethods, String expectedLine, Class<?>... cls) {
+    triggerTest(cls);
+    runAssertions(mTempDirectory, expectedMethods, expectedLine, 1);
+  }
+
+  private void triggerTest(Class<?>... cls) {
+    TestNG tng = create(mTempDirectory.toPath(), cls);
+    tng.setUseDefaultListeners(true);
+    tng.run();
+  }
+
+  private static void runAssertions(
+      File outputDir, String[] expectedMethods, String expectedLine, int expected) {
+    File failed = new File(outputDir, "testng-failed.xml");
+    for (String s : expectedMethods) {
+      List<String> resultLines = new ArrayList<>();
+      grep(failed, String.format(expectedLine, s), resultLines);
+      assertThat(resultLines.size()).isEqualTo(expected);
+    }
+  }
+}

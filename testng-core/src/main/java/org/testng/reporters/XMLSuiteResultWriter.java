@@ -1,0 +1,397 @@
+package org.testng.reporters;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Properties;
+import java.util.Set;
+import java.util.stream.Collectors;
+import org.testng.IDataProviderMethod;
+import org.testng.IResultMap;
+import org.testng.ISuiteResult;
+import org.testng.ITestContext;
+import org.testng.ITestNGMethod;
+import org.testng.ITestResult;
+import org.testng.Reporter;
+import org.testng.annotations.CustomAttribute;
+import org.testng.internal.Utils;
+import org.testng.internal.reporters.ParameterSnapshot;
+import org.testng.internal.reporters.ParameterSnapshots;
+import org.testng.internal.reporters.ParameterValue;
+import org.testng.util.Strings;
+import org.testng.util.TimeUtils;
+
+/**
+ * Utility writing an ISuiteResult to an XMLStringBuffer. Depending on the settings in the <code>
+ * config</code> property it might generate an additional XML file with the actual content and only
+ * reference the file with an <code>url</code> attribute in the passed XMLStringBuffer.
+ *
+ * @author Cosmin Marginean, Mar 16, 2007
+ */
+public class XMLSuiteResultWriter {
+
+  private final XMLReporterConfig config;
+  private final ICustomizeXmlReport customizer;
+
+  public XMLSuiteResultWriter(XMLReporterConfig config, ICustomizeXmlReport customizer) {
+    this.config = config;
+    this.customizer = customizer;
+  }
+
+  /**
+   * Writes the specified ISuiteResult in the given XMLStringBuffer. Please consider that depending
+   * on the settings in the <code>config</code> property it might generate an additional XML file
+   * with the actual content and only reference the file with an <code>url</code> attribute in the
+   * passed XMLStringBuffer.
+   *
+   * @param xmlBuffer The XML buffer where to write or reference the suite result
+   * @param suiteResult The <code>ISuiteResult</code> to serialize
+   */
+  public void writeSuiteResult(XMLStringBuffer xmlBuffer, ISuiteResult suiteResult) {
+    if (XMLReporterConfig.FF_LEVEL_SUITE_RESULT != config.getFileFragmentationLevel()) {
+      writeAllToBuffer(xmlBuffer, suiteResult);
+    } else {
+      String parentDir =
+          config.getOutputDirectory()
+              + File.separatorChar
+              + suiteResult.getTestContext().getSuite().getName();
+      File file = referenceSuiteResult(xmlBuffer, parentDir, suiteResult);
+      XMLStringBuffer suiteXmlBuffer = new XMLStringBuffer();
+      writeAllToBuffer(suiteXmlBuffer, suiteResult);
+      Utils.writeUtf8File(
+          file.getAbsoluteFile().getParent(), file.getName(), suiteXmlBuffer.toXML());
+    }
+  }
+
+  private void writeAllToBuffer(XMLStringBuffer xmlBuffer, ISuiteResult suiteResult) {
+    xmlBuffer.push(XMLReporterConfig.TAG_TEST, getSuiteResultAttributes(suiteResult));
+    Set<ITestResult> testResults = new LinkedHashSet<>();
+    ITestContext testContext = suiteResult.getTestContext();
+    addAllTestResults(testResults, testContext.getPassedTests());
+    addAllTestResults(testResults, testContext.getFailedTests());
+    addAllTestResults(testResults, testContext.getSkippedTests());
+    addAllTestResults(testResults, testContext.getPassedConfigurations());
+    addAllTestResults(testResults, testContext.getSkippedConfigurations());
+    addAllTestResults(testResults, testContext.getFailedConfigurations());
+    addAllTestResults(testResults, testContext.getFailedButWithinSuccessPercentageTests());
+    addTestResults(xmlBuffer, testResults);
+    xmlBuffer.pop();
+  }
+
+  private void addAllTestResults(Set<ITestResult> testResults, IResultMap resultMap) {
+    if (resultMap != null) {
+      // Sort the results chronologically before adding them
+      testResults.addAll(
+          resultMap.getAllResults().stream()
+              .sorted((o1, o2) -> (int) (o1.getStartMillis() - o2.getStartMillis()))
+              .collect(Collectors.toCollection(LinkedHashSet::new)));
+    }
+  }
+
+  private File referenceSuiteResult(
+      XMLStringBuffer xmlBuffer, String parentDir, ISuiteResult suiteResult) {
+    Properties attrs = new Properties();
+    String suiteResultName = suiteResult.getTestContext().getName() + ".xml";
+    attrs.setProperty(XMLReporterConfig.ATTR_URL, suiteResultName);
+    xmlBuffer.addEmptyElement(XMLReporterConfig.TAG_TEST, attrs);
+    return new File(parentDir + File.separatorChar + suiteResultName);
+  }
+
+  private Properties getSuiteResultAttributes(ISuiteResult suiteResult) {
+    Properties attributes = new Properties();
+    ITestContext tc = suiteResult.getTestContext();
+    String testName = tc.getName();
+    if (testName != null) {
+      // Properties rejects a null value, and a <test> tag is only unnamed when it was built
+      // through the no-argument XmlTest constructor, which is what the YAML parser uses.
+      attributes.setProperty(XMLReporterConfig.ATTR_NAME, testName);
+    }
+    XMLReporter.setDurationAttributes(
+        config, attributes, tc.getStartInstant(), Utils.requireEndInstantOf(tc));
+    return attributes;
+  }
+
+  private void addTestResults(XMLStringBuffer xmlBuffer, Set<ITestResult> testResults) {
+    Map<String, List<ITestResult>> testsGroupedByClass = buildTestClassGroups(testResults);
+    for (Map.Entry<String, List<ITestResult>> result : testsGroupedByClass.entrySet()) {
+      Properties attributes = buildProperties(result);
+
+      xmlBuffer.push(XMLReporterConfig.TAG_CLASS, attributes);
+      List<ITestResult> sortedResults = result.getValue();
+      Collections.sort(sortedResults);
+      for (ITestResult testResult : sortedResults) {
+        addTestResult(xmlBuffer, testResult);
+      }
+      xmlBuffer.pop();
+    }
+  }
+
+  private Properties buildProperties(Map.Entry<String, List<ITestResult>> result) {
+    Properties attributes = new Properties();
+    String className = result.getKey();
+    if (config.isSplitClassAndPackageNames()) {
+      int dot = className.lastIndexOf('.');
+      attributes.setProperty(
+          XMLReporterConfig.ATTR_NAME, dot > -1 ? className.substring(dot + 1) : className);
+      attributes.setProperty(
+          XMLReporterConfig.ATTR_PACKAGE, dot > -1 ? className.substring(0, dot) : "[default]");
+    } else {
+      attributes.setProperty(XMLReporterConfig.ATTR_NAME, className);
+    }
+    return attributes;
+  }
+
+  private Map<String, List<ITestResult>> buildTestClassGroups(Set<ITestResult> testResults) {
+    Map<String, List<ITestResult>> map = new HashMap<>();
+    for (ITestResult result : testResults) {
+      String className = result.getTestClass().getName();
+      List<ITestResult> list = map.computeIfAbsent(className, k -> new ArrayList<>());
+      list.add(result);
+    }
+    return map;
+  }
+
+  private void addTestResult(XMLStringBuffer xmlBuffer, ITestResult testResult) {
+    Properties attribs = getTestResultAttributes(testResult);
+    attribs.setProperty(XMLReporterConfig.ATTR_STATUS, getStatusString(testResult.getStatus()));
+    if (testResult.wasRetried()) {
+      attribs.setProperty(XMLReporterConfig.ATTR_RETRIED, "true");
+    }
+    xmlBuffer.push(XMLReporterConfig.TAG_TEST_METHOD, attribs);
+    addTestMethodParams(xmlBuffer, testResult);
+    addTestResultException(xmlBuffer, testResult);
+    addTestResultOutput(xmlBuffer, testResult);
+    if (config.isGenerateTestResultAttributes()) {
+      addTestResultAttributes(xmlBuffer, testResult);
+    }
+    addTestMethodCustomAttributes(xmlBuffer, testResult);
+    customizer.addCustomTagsFor(xmlBuffer, testResult);
+    xmlBuffer.pop();
+  }
+
+  private String getStatusString(int testResultStatus) {
+    switch (testResultStatus) {
+      case ITestResult.SUCCESS:
+        return "PASS";
+      case ITestResult.FAILURE:
+        return "FAIL";
+      case ITestResult.SKIP:
+        return "SKIP";
+      case ITestResult.SUCCESS_PERCENTAGE_FAILURE:
+        return "SUCCESS_PERCENTAGE_FAILURE";
+      default:
+        throw new AssertionError("Unexpected value: " + testResultStatus);
+    }
+  }
+
+  private Properties getTestResultAttributes(ITestResult testResult) {
+    Properties attributes = new Properties();
+    ITestNGMethod method = testResult.getMethod();
+    if (!method.isTest()) {
+      attributes.setProperty(XMLReporterConfig.ATTR_IS_CONFIG, "true");
+    }
+    attributes.setProperty(XMLReporterConfig.ATTR_NAME, method.getMethodName());
+    String testInstanceName = testResult.getTestName();
+    if (null != testInstanceName) {
+      attributes.setProperty(XMLReporterConfig.ATTR_TEST_INSTANCE_NAME, testInstanceName);
+    }
+    String description = method.getDescription();
+    if (!Utils.isStringEmpty(description)) {
+      attributes.setProperty(XMLReporterConfig.ATTR_DESC, description);
+    }
+
+    attributes.setProperty(XMLReporterConfig.ATTR_METHOD_SIG, removeClassName(method.toString()));
+
+    String startTime =
+        TimeUtils.formatTimeInLocalOrSpecifiedTimeZone(
+            testResult.getStartMillis(), config.getTimestampFormat());
+    String endTime =
+        TimeUtils.formatTimeInLocalOrSpecifiedTimeZone(
+            testResult.getEndMillis(), config.getTimestampFormat());
+    attributes.setProperty(XMLReporterConfig.ATTR_STARTED_AT, startTime);
+    attributes.setProperty(XMLReporterConfig.ATTR_FINISHED_AT, endTime);
+    long duration = testResult.getEndMillis() - testResult.getStartMillis();
+    String strDuration = Long.toString(duration);
+    attributes.setProperty(XMLReporterConfig.ATTR_DURATION_MS, strDuration);
+
+    if (config.isGenerateGroupsAttribute()) {
+      String groupNamesStr = Utils.arrayToString(method.getGroups());
+      if (!Utils.isStringEmpty(groupNamesStr)) {
+        attributes.setProperty(XMLReporterConfig.ATTR_GROUPS, groupNamesStr);
+      }
+    }
+
+    if (config.isGenerateDependsOnMethods()) {
+      String dependsOnStr = Utils.arrayToString(method.getMethodsDependedUpon());
+      if (!Utils.isStringEmpty(dependsOnStr)) {
+        attributes.setProperty(XMLReporterConfig.ATTR_DEPENDS_ON_METHODS, dependsOnStr);
+      }
+    }
+
+    if (config.isGenerateDependsOnGroups()) {
+      String dependsOnStr = Utils.arrayToString(method.getGroupsDependedUpon());
+      if (!Utils.isStringEmpty(dependsOnStr)) {
+        attributes.setProperty(XMLReporterConfig.ATTR_DEPENDS_ON_GROUPS, dependsOnStr);
+      }
+    }
+
+    IDataProviderMethod dp = method.getDataProviderMethod();
+    if (dp != null) {
+      String dataProvider = dp.getName();
+      if (!Strings.isNullOrEmpty(dataProvider)) {
+        attributes.setProperty(XMLReporterConfig.ATTR_DATA_PROVIDER, dataProvider);
+      }
+    }
+
+    return attributes;
+  }
+
+  private String removeClassName(String methodSignature) {
+    int firstParanthesisPos = methodSignature.indexOf("(");
+    int dotAferClassPos = methodSignature.substring(0, firstParanthesisPos).lastIndexOf(".");
+    return methodSignature.substring(dotAferClassPos + 1);
+  }
+
+  /**
+   * Writes the values the invocation ran with, as they were when it started rather than as the
+   * objects stand now. A data provider that hands the same mutable row to every invocation, or a
+   * test that changes what it was given, used to leave every {@code <test-method>} of the method
+   * reporting that value's final state -- the report is written once every invocation is over.
+   */
+  public void addTestMethodParams(XMLStringBuffer xmlBuffer, ITestResult testResult) {
+    ParameterSnapshot snapshot = ParameterSnapshots.reportedParametersOf(testResult);
+    if (snapshot == null) {
+      return;
+    }
+    List<ParameterValue> values = snapshot.values();
+    // Empty for an invocation a data provider supplied the wrong number of values to. Nothing was
+    // rendered for it, because the values never reached the invocation either: the matcher throws
+    // while conforming them, so the result carries none and this wrote no <params> before.
+    if (values.isEmpty()) {
+      return;
+    }
+    xmlBuffer.push(XMLReporterConfig.TAG_PARAMS);
+    for (int i = 0; i < values.size(); i++) {
+      addParameter(xmlBuffer, values.get(i), i);
+    }
+    xmlBuffer.pop();
+  }
+
+  private void addParameter(XMLStringBuffer xmlBuffer, ParameterValue parameter, int i) {
+    Properties attrs = new Properties();
+    attrs.setProperty(XMLReporterConfig.ATTR_INDEX, String.valueOf(i));
+    xmlBuffer.push(XMLReporterConfig.TAG_PARAM, attrs);
+    if (parameter.isNull()) {
+      Properties valueAttrs = new Properties();
+      valueAttrs.setProperty(XMLReporterConfig.ATTR_IS_NULL, "true");
+      xmlBuffer.addEmptyElement(XMLReporterConfig.TAG_PARAM_VALUE, valueAttrs);
+    } else {
+      xmlBuffer.addCDATAElement(XMLReporterConfig.TAG_PARAM_VALUE, parameter.value());
+    }
+    xmlBuffer.pop();
+  }
+
+  private void addTestResultException(XMLStringBuffer xmlBuffer, ITestResult testResult) {
+    Throwable exception = testResult.getThrowable();
+    if (exception != null) {
+      Properties exceptionAttrs = new Properties();
+      exceptionAttrs.setProperty(XMLReporterConfig.ATTR_CLASS, exception.getClass().getName());
+      xmlBuffer.push(XMLReporterConfig.TAG_EXCEPTION, exceptionAttrs);
+
+      if (!Utils.isStringEmpty(exception.getMessage())) {
+        xmlBuffer.push(XMLReporterConfig.TAG_MESSAGE);
+        xmlBuffer.addCDATA(exception.getMessage());
+        xmlBuffer.pop();
+      }
+
+      XMLReporterConfig.StackTraceLevels level = calculateStackTraceLevels(testResult);
+      switch (level) {
+        case SHORT:
+          xmlBuffer.push(XMLReporterConfig.TAG_SHORT_STACKTRACE);
+          xmlBuffer.addCDATA(Utils.shortStackTrace(exception, false));
+          xmlBuffer.pop();
+          break;
+        case FULL:
+          xmlBuffer.push(XMLReporterConfig.TAG_FULL_STACKTRACE);
+          xmlBuffer.addCDATA(Utils.longStackTrace(exception, false));
+          xmlBuffer.pop();
+          break;
+        default:
+          // everything else is ignored for now.
+      }
+
+      xmlBuffer.pop();
+    }
+  }
+
+  private XMLReporterConfig.StackTraceLevels calculateStackTraceLevels(ITestResult testResult) {
+    XMLReporterConfig.StackTraceLevels stackTraceoutputMethod = config.getStackTraceOutput();
+    if (testResult.isSuccess()) {
+      stackTraceoutputMethod = config.getStackTraceOutputLevelForPassedTests();
+    }
+    return stackTraceoutputMethod;
+  }
+
+  private void addTestResultOutput(XMLStringBuffer xmlBuffer, ITestResult testResult) {
+    // TODO: Cosmin - maybe a <line> element isn't indicated for each line
+    xmlBuffer.push(XMLReporterConfig.TAG_REPORTER_OUTPUT);
+    List<String> output = Reporter.getOutput(testResult);
+    for (String line : output) {
+      if (line != null) {
+        xmlBuffer.push(XMLReporterConfig.TAG_LINE);
+        xmlBuffer.addCDATA(line);
+        xmlBuffer.pop();
+      }
+    }
+    xmlBuffer.pop();
+  }
+
+  private void addTestResultAttributes(XMLStringBuffer xmlBuffer, ITestResult testResult) {
+    if (testResult.getAttributeNames() != null && !testResult.getAttributeNames().isEmpty()) {
+      xmlBuffer.push(XMLReporterConfig.TAG_ATTRIBUTES);
+      for (String attrName : testResult.getAttributeNames()) {
+        if (attrName == null) {
+          continue;
+        }
+        Object attrValue = testResult.getAttribute(attrName);
+
+        Properties attributeAttrs = new Properties();
+        attributeAttrs.setProperty(XMLReporterConfig.ATTR_NAME, attrName);
+        if (attrValue == null) {
+          attributeAttrs.setProperty(XMLReporterConfig.ATTR_IS_NULL, "true");
+          xmlBuffer.addEmptyElement(XMLReporterConfig.TAG_ATTRIBUTE, attributeAttrs);
+        } else {
+          xmlBuffer.push(XMLReporterConfig.TAG_ATTRIBUTE, attributeAttrs);
+          xmlBuffer.addCDATA(attrValue.toString());
+          xmlBuffer.pop();
+        }
+      }
+      xmlBuffer.pop();
+    }
+  }
+
+  private void addTestMethodCustomAttributes(XMLStringBuffer xmlBuffer, ITestResult testResult) {
+    CustomAttribute[] attributes = testResult.getMethod().getAttributes();
+    if (attributes == null || attributes.length == 0) {
+      return;
+    }
+    xmlBuffer.push(XMLReporterConfig.TAG_CUSTOM_ATTRIBUTES);
+    for (CustomAttribute attribute : attributes) {
+      xmlBuffer.push(XMLReporterConfig.TAG_CUSTOM_ATTRIBUTE);
+      Properties properties = new Properties();
+      properties.setProperty(XMLReporterConfig.TAG_CUSTOM_ATTRIBUTE_VALUE, attribute.name());
+      xmlBuffer.push(XMLReporterConfig.TAG_CUSTOM_ATTRIBUTE_NAME, properties);
+      xmlBuffer.pop();
+      xmlBuffer.push(XMLReporterConfig.TAG_CUSTOM_ATTRIBUTE_VALUE);
+      xmlBuffer.addCDATA(Arrays.toString(attribute.values()));
+      xmlBuffer.pop();
+      xmlBuffer.pop();
+    }
+    xmlBuffer.pop();
+  }
+}

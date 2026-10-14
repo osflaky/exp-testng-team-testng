@@ -1,0 +1,56 @@
+package test.methodselectors;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import org.testng.ITestNGListener;
+import org.testng.TestListenerAdapter;
+import org.testng.TestNG;
+import org.testng.annotations.BeforeMethod;
+import org.testng.annotations.Test;
+import org.testng.xml.XmlClass;
+import org.testng.xml.XmlMethodSelector;
+import org.testng.xml.XmlSuite;
+import org.testng.xml.XmlTest;
+import test.SimpleBaseTest;
+import test.TestHelper;
+
+public class MethodSelectorInSuiteTest extends SimpleBaseTest {
+
+  private TestListenerAdapter m_tla;
+
+  @BeforeMethod
+  public void setup() {
+    m_tla = new TestListenerAdapter();
+  }
+
+  @Test
+  public void programmaticXmlSuite() {
+    TestNG tng = create();
+    XmlSuite suite = new XmlSuite();
+    XmlMethodSelector methodSelector = new XmlMethodSelector();
+    methodSelector.setName("test.methodselectors.Test2MethodSelector");
+    methodSelector.setPriority(-1);
+    List<XmlMethodSelector> methodSelectors = new ArrayList<>();
+    methodSelectors.add(methodSelector);
+    suite.setMethodSelectors(methodSelectors);
+    XmlTest test = new XmlTest(suite);
+    XmlClass testClass = new XmlClass(test.methodselectors.SampleTest.class);
+    test.setXmlClasses(Collections.singletonList(testClass));
+    tng.setXmlSuites(Collections.singletonList(suite));
+    tng.addListener((ITestNGListener) m_tla);
+    tng.run();
+
+    TestHelper.assertPassedTestNames(m_tla.getPassedTests(), "test2");
+  }
+
+  @Test
+  public void xmlXmlSuite() {
+    TestNG tng = create();
+    tng.setTestSuites(Collections.singletonList(getPathToResource("methodselector-in-xml.xml")));
+    tng.addListener((ITestNGListener) m_tla);
+    tng.run();
+
+    TestHelper.assertPassedTestNames(m_tla.getPassedTests(), "test2");
+  }
+}

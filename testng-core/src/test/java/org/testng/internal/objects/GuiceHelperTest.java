@@ -1,0 +1,70 @@
+package org.testng.internal.objects;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import com.google.inject.Injector;
+import com.google.inject.Module;
+import com.google.inject.Stage;
+import java.util.HashMap;
+import org.jspecify.annotations.Nullable;
+import org.testng.IInjectorFactory;
+import org.testng.ITest;
+import org.testng.ITestObjectFactory;
+import org.testng.SampleIModule;
+import org.testng.annotations.Guice;
+import org.testng.annotations.Test;
+import org.testng.internal.ClassImpl;
+import org.testng.internal.Configuration;
+import org.testng.internal.paramhandler.FakeTestContext;
+import test.guice.FakeInjector;
+
+@Guice
+public final class GuiceHelperTest {
+
+  private final GuiceHelper guiceHelper = new GuiceHelper(new FakeTestContext());
+
+  @Test(description = "GITHUB-2273")
+  public void getInjector_spiModule_injectorHasModule() {
+    MockInjector injector =
+        (MockInjector) guiceHelper.getInjector(new MockClass(), new MockInjectorFactory());
+
+    assertThat(injector).isNotNull();
+    Module[] modules = injector.getModules();
+    assertThat(modules).isNotNull();
+    assertThat(modules.length).isEqualTo(1);
+    assertThat(modules[0]).isEqualTo(new SampleIModule().getModule());
+  }
+
+  private static final class MockInjectorFactory implements IInjectorFactory {
+
+    @Override
+    public Injector getInjector(@Nullable Injector parent, Stage stage, Module... modules) {
+      return new MockInjector(modules);
+    }
+  }
+
+  private static final class MockInjector extends FakeInjector {
+    private final Module[] modules;
+
+    public MockInjector(Module[] modules) {
+      this.modules = modules;
+    }
+
+    public Module[] getModules() {
+      return modules;
+    }
+  }
+
+  private static final class MockClass extends ClassImpl {
+    public MockClass() {
+      super(
+          new FakeTestContext(),
+          GuiceHelperTest.class,
+          null,
+          new IdentifiableObject((ITest) () -> "GITHUB-2273"),
+          new HashMap<>(),
+          new Configuration().getAnnotationFinder(),
+          new ITestObjectFactory() {});
+    }
+  }
+}

@@ -1,0 +1,719 @@
+package org.testng.internal;
+
+import java.lang.reflect.Method;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Comparator;
+import java.util.Deque;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Predicate;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+import org.jspecify.annotations.Nullable;
+import org.testng.IMethodInstance;
+import org.testng.ITestClass;
+import org.testng.ITestNGMethod;
+import org.testng.TestNGException;
+import org.testng.annotations.IConfigurationAnnotation;
+import org.testng.annotations.ITestAnnotation;
+import org.testng.annotations.ITestOrConfiguration;
+import org.testng.internal.annotations.AnnotationHelper;
+import org.testng.internal.annotations.IAnnotationFinder;
+import org.testng.internal.collections.Pair;
+import org.testng.internal.invokers.IInvocationStatus;
+import org.testng.util.TimeUtils;
+import org.testng.xml.XmlTest;
+
+/** Collection of helper methods to help sort and arrange methods. */
+public class MethodHelper {
+  private static final Map<ITestNGMethod[], Graph<ITestNGMethod>> GRAPH_CACHE =
+      new ConcurrentHashMap<>();
+  private static final Map<Method, String> CANONICAL_NAME_CACHE = new ConcurrentHashMap<>();
+  private static final Map<Pair<String, String>, Boolean> MATCH_CACHE = new ConcurrentHashMap<>();
+
+  /**
+   * Collects and orders test or configuration methods
+   *
+   * @param methods methods to be worked on
+   * @param forTests true for test methods, false for configuration methods
+   * @param runInfo - {@link RunInfo} object.
+   * @param finder annotation finder
+   * @param unique true for unique methods, false otherwise
+   * @param outExcludedMethods - A List of excluded {@link ITestNGMethod} methods.
+   * @return an array of ordered methods
+   */
+  public static ITestNGMethod[] collectAndOrderMethods(
+      List<ITestNGMethod> methods,
+      boolean forTests,
+      RunInfo runInfo,
+      IAnnotationFinder finder,
+      boolean unique,
+      List<ITestNGMethod> outExcludedMethods,
+      Comparator<ITestNGMethod> comparator) {
+    List<ITestNGMethod> includedMethods = new ArrayList<>();
+    TimeUtils.computeAndShowTime(
+        "MethodGroupsHelper.collectMethodsByGroup()",
+        () ->
+            MethodGroupsHelper.collectMethodsByGroup(
+                methods.toArray(new ITestNGMethod[0]),
+                forTests,
+                includedMethods,
+                outExcludedMethods,
+                runInfo,
+                finder,
+                unique));
+    return TimeUtils.computeAndShowTime(
+        "MethodGroupsHelper.sortMethods()",
+        () -> sortMethods(forTests, includedMethods, comparator).toArray(new ITestNGMethod[] {}));
+  }
+
+  /**
+   * Finds TestNG methods that the specified TestNG method depends upon
+   *
+   * @param m TestNG method
+   * @param methods list of methods to search for depended upon methods
+   * @return an array of methods that match the criteria
+   */
+  protected static ITestNGMethod[] findDependedUponMethods(
+      ITestNGMethod m, List<ITestNGMethod> methods) {
+    ITestNGMethod[] methodsArray = methods.toArray(new ITestNGMethod[0]);
+    return findDependedUponMethods(m, methodsArray);
+  }
+
+  private static Pair<String, Predicate<ITestNGMethod>> filterToUse(ITestNGMethod m) {
+    if (m.isBeforeMethodConfiguration()) {
+      return new Pair<>("BeforeMethod", ITestNGMethod::isBeforeMethodConfiguration);
+    }
+    if (m.isAfterMethodConfiguration()) {
+      return new Pair<>("AfterMethod", ITestNGMethod::isAfterMethodConfiguration);
+    }
+    if (m.isBeforeClassConfiguration()) {
+      return new Pair<>("BeforeClass", ITestNGMethod::isBeforeClassConfiguration);
+    }
+    if (m.isAfterClassConfiguration()) {
+      return new Pair<>("AfterClass", ITestNGMethod::isAfterClassConfiguration);
+    }
+    if (m.isBeforeTestConfiguration()) {
+      return new Pair<>("BeforeTest", ITestNGMethod::isBeforeTestConfiguration);
+    }
+    if (m.isAfterTestConfiguration()) {
+      return new Pair<>("AfterTest", ITestNGMethod::isAfterTestConfiguration);
+    }
+    if (m.isBeforeSuiteConfiguration()) {
+      return new Pair<>("BeforeSuite", ITestNGMethod::isBeforeSuiteConfiguration);
+    }
+    if (m.isAfterSuiteConfiguration()) {
+      return new Pair<>("AfterSuite", ITestNGMethod::isAfterSuiteConfiguration);
+    }
+    if (m.isBeforeGroupsConfiguration()) {
+      return new Pair<>("BeforeGroups", ITestNGMethod::isBeforeGroupsConfiguration);
+    }
+    if (m.isAfterGroupsConfiguration()) {
+      return new Pair<>("AfterGroups", ITestNGMethod::isAfterGroupsConfiguration);
+    }
+    return new Pair<>("Test", ITestNGMethod::isTest);
+  }
+
+  /**
+   * Finds TestNG methods that the specified TestNG method depends upon
+   *
+   * @param m TestNG method
+   * @param incoming list of methods to search for depended upon methods
+   * @return an array of methods that match the criteria
+   */
+  public static ITestNGMethod[] findDependedUponMethods(ITestNGMethod m, ITestNGMethod[] incoming) {
+    ITestNGMethod[] methods =
+        Arrays.stream(incoming)
+            .filter(each -> !each.equals(m))
+            .filter(each -> isTopLevelOrSameTestClass(each, m))
+            .toArray(ITestNGMethod[]::new);
+    String canonicalMethodName = calculateMethodCanonicalName(m);
+    Pair<String, Predicate<ITestNGMethod>> filterPair = filterToUse(m);
+    String annotationType = filterPair.first();
+    Predicate<ITestNGMethod> predicate = filterPair.second();
+
+    if (isConfigurationMethod(m)) {
+      methods =
+          Arrays.stream(incoming)
+              .filter(tm -> !tm.equals(m)) // exclude the current config method from the list
+              .filter(predicate) // include only similar config methods
+              .toArray(ITestNGMethod[]::new);
+
+      if (methods.length == 0) {
+        String msg =
+            String.format(
+                "None of the dependencies of the method %s are annotated with [@%s].",
+                canonicalMethodName, annotationType);
+        throw new TestNGException(msg);
+      }
+    }
+
+    List<ITestNGMethod> vResult = new ArrayList<>();
+    String regexp = null;
+    for (String fullyQualifiedRegexp : m.getMethodsDependedUpon()) {
+      boolean foundAtLeastAMethod = false;
+
+      if (null != fullyQualifiedRegexp) {
+        // Escapes $ in regexps as it is not meant for end - line matching, but inner class matches.
+        regexp = fullyQualifiedRegexp.replace("$", "\\$");
+        MatchResults results = matchMethod(methods, regexp);
+        foundAtLeastAMethod = results.foundAtLeastAMethod;
+        vResult.addAll(results.matchedMethods);
+        if (!foundAtLeastAMethod) {
+          // Replace the declaring class name in the dependsOnMethods value with
+          // the fully qualified test class name and retry the method matching.
+          int lastIndex = regexp.lastIndexOf('.');
+          String newMethodName;
+          if (lastIndex != -1) {
+            String clazzName =
+                (m.getTestClass() != null ? m.getTestClass().getRealClass() : m.getRealClass())
+                    .getName();
+            newMethodName = clazzName + regexp.substring(lastIndex);
+            results = matchMethod(methods, newMethodName);
+            foundAtLeastAMethod = results.foundAtLeastAMethod;
+            vResult.addAll(results.matchedMethods);
+          }
+        }
+      }
+
+      if (!foundAtLeastAMethod) {
+        if (m.ignoreMissingDependencies()) {
+          continue;
+        }
+        if (m.isAlwaysRun()) {
+          continue;
+        }
+        Method maybeReferringTo = findMethodByName(m, regexp);
+        if (maybeReferringTo != null) {
+          String suffix = " or not included.";
+          if (isConfigurationMethod(m)) {
+            suffix = ".";
+          }
+          throw new TestNGException(
+              canonicalMethodName
+                  + "() is depending on method "
+                  + maybeReferringTo
+                  + ", which is not annotated with @"
+                  + annotationType
+                  + suffix);
+        }
+        throw new TestNGException(
+            canonicalMethodName + "() depends on nonexistent method " + regexp);
+      }
+    } // end for
+
+    return vResult.toArray(new ITestNGMethod[0]);
+  }
+
+  /**
+   * Finds method based on regex and TestNGMethod. If regex doesn't represent the class name, uses
+   * the TestNG method's class name.
+   *
+   * @param testngMethod TestNG method
+   * @param regExp regex representing a method and/or related class name
+   */
+  private static @Nullable Method findMethodByName(
+      ITestNGMethod testngMethod, @Nullable String regExp) {
+    if (regExp == null) {
+      return null;
+    }
+    regExp = regExp.replace("\\$", "$");
+    int lastDot = regExp.lastIndexOf('.');
+    String className;
+    String methodName;
+    if (lastDot == -1) {
+      className = testngMethod.getConstructorOrMethod().getDeclaringClass().getCanonicalName();
+      methodName = regExp;
+    } else {
+      methodName = regExp.substring(lastDot + 1);
+      className = regExp.substring(0, lastDot);
+    }
+
+    try {
+      Class<?> c = Class.forName(className);
+      for (Method m : c.getDeclaredMethods()) {
+        if (methodName.equals(m.getName())) {
+          return m;
+        }
+      }
+    } catch (Exception e) {
+      // only logging
+      Utils.log("MethodHelper", 3, "Caught exception while searching for methods using regex");
+    }
+    return null;
+  }
+
+  public static boolean isEnabled(Class<?> objectClass, IAnnotationFinder finder) {
+    ITestAnnotation testClassAnnotation = AnnotationHelper.findTest(finder, objectClass);
+    return isEnabled(testClassAnnotation);
+  }
+
+  public static boolean isEnabled(Method m, IAnnotationFinder finder) {
+    ITestAnnotation annotation = AnnotationHelper.findTest(finder, m);
+
+    // If no method annotation, look for one on the class
+    if (null == annotation) {
+      annotation = AnnotationHelper.findTest(finder, m.getDeclaringClass());
+    }
+
+    return isEnabled(annotation);
+  }
+
+  public static boolean isEnabled(@Nullable ITestOrConfiguration test) {
+    return null == test || test.getEnabled();
+  }
+
+  public static boolean isAlwaysRun(@Nullable IConfigurationAnnotation configurationAnnotation) {
+    return null != configurationAnnotation
+        && configurationAnnotation.getAlwaysRun()
+        && (isBeforeConfiguration(configurationAnnotation)
+            || isAfterConfiguration(configurationAnnotation));
+  }
+
+  /**
+   * Answers whether {@code alwaysRun} lets a configuration method run after a method invoked before
+   * it failed or was skipped. That is what {@code alwaysRun} means on an &#64;After method. On a
+   * &#64;Before method it only lifts the group filtering (GITHUB-1622).
+   *
+   * <p>The role comes from {@code method}, not from the annotation. TestNG merges every
+   * configuration annotation on one Java method into one annotation object, so a {@code
+   * &#64;BeforeMethod &#64;AfterMethod(alwaysRun = true)} method bypasses a failure in its teardown
+   * role and not in its setup role.
+   *
+   * @param method the configuration method, in the role TestNG is about to run it in
+   * @param annotation the annotation carried by the configuration method
+   * @return true if the method may run past a recorded failure
+   */
+  public static boolean canBypassConfigurationFailure(
+      ITestNGMethod method, @Nullable IConfigurationAnnotation annotation) {
+    return isAlwaysRun(annotation) && isInAnAfterRole(method);
+  }
+
+  private static boolean isInAnAfterRole(ITestNGMethod method) {
+    return method.isAfterSuiteConfiguration()
+        || method.isAfterTestConfiguration()
+        || method.isAfterClassConfiguration()
+        || method.isAfterMethodConfiguration()
+        || method.isAfterGroupsConfiguration();
+  }
+
+  private static boolean isBeforeConfiguration(IConfigurationAnnotation annotation) {
+    return annotation.getBeforeSuite()
+        || annotation.getBeforeTest()
+        || annotation.getBeforeTestClass()
+        || annotation.getBeforeTestMethod()
+        || annotation.getBeforeGroups().length != 0;
+  }
+
+  private static boolean isAfterConfiguration(IConfigurationAnnotation annotation) {
+    return annotation.getAfterSuite()
+        || annotation.getAfterTest()
+        || annotation.getAfterTestClass()
+        || annotation.getAfterTestMethod()
+        || annotation.getAfterGroups().length != 0;
+  }
+
+  /** Extracts the unique list of <code>ITestNGMethod</code>s. */
+  public static List<ITestNGMethod> uniqueMethodList(Collection<List<ITestNGMethod>> methods) {
+    Set<ITestNGMethod> resultSet = new HashSet<>();
+
+    for (List<ITestNGMethod> l : methods) {
+      resultSet.addAll(l);
+    }
+
+    return new ArrayList<>(resultSet);
+  }
+
+  private static Graph<ITestNGMethod> topologicalSort(
+      ITestNGMethod[] methods,
+      List<ITestNGMethod> sequentialList,
+      List<ITestNGMethod> parallelList,
+      final Comparator<ITestNGMethod> comparator) {
+    Graph<ITestNGMethod> result =
+        new Graph<>((o1, o2) -> comparator.compare(o1.getObject(), o2.getObject()));
+
+    if (methods.length == 0) {
+      return result;
+    }
+
+    //
+    // Create the graph
+    //
+
+    Map<Object, List<ITestNGMethod>> testInstances = sortMethodsByInstance(methods);
+
+    XmlTest xmlTest = null;
+
+    for (ITestNGMethod m : methods) {
+      if (xmlTest == null) {
+        xmlTest = m.getXmlTest();
+      }
+      result.addNode(m);
+
+      List<ITestNGMethod> predecessors = new ArrayList<>();
+
+      String[] methodsDependedUpon = m.getMethodsDependedUpon();
+      if (methodsDependedUpon.length > 0) {
+        ITestNGMethod[] methodsNamed;
+        // sortMethodsByInstance keeps NO_INSTANCE out of the map, so a method that carries no
+        // instance simply misses here.
+        List<ITestNGMethod> instanceMethods = testInstances.get(IInstanceIdentity.getInstanceId(m));
+        if (instanceMethods != null) {
+          try {
+            // Search for other methods that depends upon with the same instance
+            methodsNamed = MethodHelper.findDependedUponMethods(m, instanceMethods);
+          } catch (TestNGException e) {
+            // Maybe this method has a dependency on a method that resides in a different instance.
+            // Lets try searching for all methods now
+            methodsNamed = MethodHelper.findDependedUponMethods(m, methods);
+          }
+        } else {
+          // Search all methods
+          methodsNamed = MethodHelper.findDependedUponMethods(m, methods);
+        }
+        predecessors.addAll(Arrays.asList(methodsNamed));
+      }
+      // A group configuration method is left out: it is resolved against configuration methods of
+      // its own kind here, where a group names test methods. DynamicGraphHelper is what carries a
+      // @BeforeGroups dependsOnGroups over to the tests of the group it runs before.
+      boolean anyConfigExceptGroupConfigs =
+          !(m.isBeforeGroupsConfiguration() || m.isAfterGroupsConfiguration());
+      boolean isGroupAgnosticConfigMethod = !m.isTest() && anyConfigExceptGroupConfigs;
+      if (isGroupAgnosticConfigMethod) {
+        String[] groupsDependedUpon =
+            Optional.ofNullable(m.getGroupsDependedUpon()).orElse(new String[0]);
+        for (String group : groupsDependedUpon) {
+          ITestNGMethod[] methodsThatBelongToGroup =
+              MethodGroupsHelper.findMethodsThatBelongToGroup(m, methods, group);
+          predecessors.addAll(Arrays.asList(methodsThatBelongToGroup));
+        }
+      }
+
+      for (ITestNGMethod predecessor : predecessors) {
+        result.addPredecessor(m, predecessor);
+      }
+    }
+
+    result.topologicalSort();
+    sequentialList.addAll(result.getStrictlySortedNodes());
+    parallelList.addAll(result.getIndependentNodes());
+
+    return result;
+  }
+
+  private static Comparator<ITestNGMethod> bubbleUpIndependentMethodsFirst() {
+    return (a, b) -> {
+      boolean aIsIndependent = isIndependent(a);
+      boolean bIsIndependent = isIndependent(b);
+      if (aIsIndependent && bIsIndependent) {
+        // Both a and b are independent methods. So treat them as equal.
+        return 0;
+      }
+      if (aIsIndependent) {
+        // First method is independent. So a should come before b.
+        return -1;
+      }
+      if (bIsIndependent) {
+        // Second method is independent. So a should come after b.
+        return 1;
+      }
+      // Both a and b are dependent methods. So treat them as equal
+      return 0;
+    };
+  }
+
+  private static boolean isIndependent(ITestNGMethod tm) {
+    return tm.getMethodsDependedUpon().length == 0 && tm.getGroupsDependedUpon().length == 0;
+  }
+
+  /**
+   * This method is used to create a map of test instances and their associated method(s) . Used to
+   * decrease the scope to only a methods instance when trying to find method dependencies.
+   *
+   * @param methods Methods to be sorted
+   * @return Map of Instances as the keys and the methods associated with the instance as the values
+   */
+  private static Map<Object, List<ITestNGMethod>> sortMethodsByInstance(ITestNGMethod[] methods) {
+    // Group by the per-instance id rather than the instantiated instance so that building the
+    // dependency graph never forces a lazy @Factory instance to be created during collection.
+    return Arrays.stream(methods)
+        .parallel()
+        .filter(IInstanceIdentity::carriesInstance)
+        .collect(Collectors.groupingBy(IInstanceIdentity::getInstanceId, Collectors.toList()));
+  }
+
+  protected static String calculateMethodCanonicalName(ITestNGMethod m) {
+    return calculateMethodCanonicalName(m.getConstructorOrMethod().requireMethod());
+  }
+
+  private static String calculateMethodCanonicalName(Method m) {
+    String result = CANONICAL_NAME_CACHE.get(m);
+    if (result != null) {
+      return result;
+    }
+
+    String packageName = m.getDeclaringClass().getName() + "." + m.getName();
+
+    // Try to find the method on this class or parents
+    Class<?> cls = m.getDeclaringClass();
+    while (cls != Object.class) {
+      try {
+        if (cls.getDeclaredMethod(m.getName(), m.getParameterTypes()) != null) {
+          packageName = cls.getName();
+          break;
+        }
+      } catch (Exception e) {
+        // ignore
+      }
+      cls = cls.getSuperclass();
+    }
+
+    result = packageName + "." + m.getName();
+    CANONICAL_NAME_CACHE.put(m, result);
+    return result;
+  }
+
+  private static List<ITestNGMethod> sortMethods(
+      boolean forTests, List<ITestNGMethod> allMethods, Comparator<ITestNGMethod> comparator) {
+    // A configuration priority leads whatever -Dtestng.order selects, so that @BeforeX(priority)
+    // behaves like @Test(priority), which TestMethodComparator applies at run time without
+    // consulting MethodSorting. Configuration methods have no such run time scheduler -- they are
+    // invoked in the order collected here -- so this is the only seam the priority can act on. The
+    // default ordering already leads with the same key, so this only adds anything under the
+    // "methods" and "none" orderings, and it is a no-op while every method reports the default 0.
+    Comparator<ITestNGMethod> effectiveComparator =
+        forTests ? comparator : MethodSorting.BY_PRIORITY.thenComparing(comparator);
+    List<ITestNGMethod> sl = new ArrayList<>();
+    List<ITestNGMethod> pl = new ArrayList<>();
+    ITestNGMethod[] allMethodsArray = allMethods.toArray(new ITestNGMethod[0]);
+
+    // Fix the method inheritance if these are @Configuration methods to make
+    // sure base classes are invoked before child classes if 'before' and the
+    // other way around if they are 'after'
+    if (!forTests && allMethodsArray.length > 0) {
+      ITestNGMethod m = allMethodsArray[0];
+      boolean before =
+          m.isBeforeClassConfiguration()
+              || m.isBeforeMethodConfiguration()
+              || m.isBeforeSuiteConfiguration()
+              || m.isBeforeTestConfiguration();
+      MethodInheritance.fixMethodInheritance(allMethodsArray, before);
+
+      // In-case the user has ended up using "dependsOn" on configurations, then sometimes
+      // TestNG ends up finding the configuration methods in such a way that, it can cause
+      // un-expected failures. This usually happens due to the fully qualified method names
+      // acting up. So let's re-order the methods such that, the independent configurations always
+      // bubble up to the top and the ones that have dependencies get pushed to the bottom.
+      // That way, when we do a topologicalSort sort, the logic would work fine.
+
+      allMethodsArray =
+          Arrays.stream(allMethodsArray)
+              .sorted(bubbleUpIndependentMethodsFirst())
+              .toArray(ITestNGMethod[]::new);
+    }
+
+    topologicalSort(allMethodsArray, sl, pl, effectiveComparator);
+
+    List<ITestNGMethod> result = new ArrayList<>();
+    result.addAll(sl);
+    result.addAll(pl);
+    return result;
+  }
+
+  /**
+   * Methods {@code method} depends on, including {@code dependsOnMethods} predecessors from the
+   * ordering graph and, for a test method, the test methods of each {@code dependsOnGroups} group.
+   * The work queue walks only direct graph predecessors and handles transitivity itself. Group
+   * members are walked the same way, so a member's own method and group dependencies stay in the
+   * closure. The graph itself still omits those group edges for test methods: runtime scheduling
+   * carries them in {@code DynamicGraphHelper}. FailedReporter is the caller that needs the group
+   * members as well, so a passed member of a depended-upon group is kept in testng-failed.xml.
+   */
+  public static List<ITestNGMethod> getMethodsDependedUpon(
+      ITestNGMethod method, ITestNGMethod[] methods, Comparator<ITestNGMethod> comparator) {
+    Graph<ITestNGMethod> g = GRAPH_CACHE.get(methods);
+    if (g == null) {
+      List<ITestNGMethod> parallelList = new ArrayList<>();
+      List<ITestNGMethod> sequentialList = new ArrayList<>();
+      g = topologicalSort(methods, sequentialList, parallelList, comparator);
+      GRAPH_CACHE.put(methods, g);
+    }
+
+    LinkedHashSet<ITestNGMethod> result = new LinkedHashSet<>();
+    Deque<ITestNGMethod> work = new ArrayDeque<>();
+    Set<ITestNGMethod> seen = new HashSet<>();
+    seen.add(method);
+    work.add(method);
+    while (!work.isEmpty()) {
+      ITestNGMethod current = work.removeFirst();
+      for (ITestNGMethod predecessor : directPredecessors(g, current)) {
+        enqueueDependency(predecessor, result, seen, work);
+      }
+      if (!current.isTest()) {
+        continue;
+      }
+      String[] groupsDependedUpon =
+          Optional.ofNullable(current.getGroupsDependedUpon()).orElse(new String[0]);
+      for (String group : groupsDependedUpon) {
+        ITestNGMethod[] groupMembers =
+            MethodGroupsHelper.findMethodsThatBelongToGroup(current, methods, group);
+        for (ITestNGMethod groupMember : groupMembers) {
+          if (groupMember.isTest() && !groupMember.equals(current)) {
+            enqueueDependency(groupMember, result, seen, work);
+          }
+        }
+      }
+    }
+    return new ArrayList<>(result);
+  }
+
+  private static void enqueueDependency(
+      ITestNGMethod candidate,
+      Set<ITestNGMethod> result,
+      Set<ITestNGMethod> seen,
+      Deque<ITestNGMethod> work) {
+    if (seen.add(candidate)) {
+      result.add(candidate);
+      work.add(candidate);
+    }
+  }
+
+  // Interceptor-added methods can be absent from the ordering graph.
+  private static Collection<ITestNGMethod> directPredecessors(
+      Graph<ITestNGMethod> graph, ITestNGMethod method) {
+    try {
+      return graph.getPredecessors(method);
+    } catch (TestNGException ignored) {
+      return List.of();
+    }
+  }
+
+  // TODO: This needs to be revisited so that, we dont update the parameter list "methodList"
+  // but we are returning the values.
+  public static void fixMethodsWithClass(
+      ITestNGMethod[] methods, ITestClass testCls, @Nullable List<ITestNGMethod> methodList) {
+    for (ITestNGMethod itm : methods) {
+      itm.setTestClass(testCls);
+
+      if (methodList != null) {
+        methodList.add(itm);
+      }
+    }
+  }
+
+  public static List<IMethodInstance> methodsToMethodInstances(List<ITestNGMethod> sl) {
+    return sl.stream().map(MethodInstance::new).collect(Collectors.toList());
+  }
+
+  public static List<ITestNGMethod> methodInstancesToMethods(
+      List<IMethodInstance> methodInstances) {
+    return methodInstances.stream().map(IMethodInstance::getMethod).collect(Collectors.toList());
+  }
+
+  public static void dumpInvokedMethodInfoToConsole(ITestNGMethod[] methods, int currentVerbosity) {
+    if (currentVerbosity < 3) {
+      return;
+    }
+    System.out.println("===== Invoked methods");
+    Arrays.stream(methods)
+        .filter(m -> m instanceof IInvocationStatus)
+        .filter(m -> ((IInvocationStatus) m).getInvocationTime() > 0)
+        .forEach(
+            im -> {
+              if (im.isTest()) {
+                System.out.print("    ");
+              } else if (isConfigurationMethod(im)) {
+                System.out.print("  ");
+              } else {
+                return;
+              }
+              System.out.println(String.valueOf(im));
+            });
+    System.out.println("=====");
+  }
+
+  /**
+   * Nested-class methods stay out of regex {@code dependsOnMethods} matching (GITHUB-141), but a
+   * nested test class must still see its own siblings (GITHUB-3222), including methods inherited
+   * onto that nested class.
+   */
+  private static boolean isTopLevelOrSameTestClass(
+      ITestNGMethod candidate, ITestNGMethod dependant) {
+    Class<?> candidateClass = effectiveTestClass(candidate);
+    return Objects.isNull(candidateClass.getEnclosingClass())
+        || candidateClass.equals(effectiveTestClass(dependant));
+  }
+
+  private static Class<?> effectiveTestClass(ITestNGMethod method) {
+    ITestClass testClass = method.getTestClass();
+    if (testClass != null) {
+      return testClass.getRealClass();
+    }
+    return method.getRealClass();
+  }
+
+  private static boolean isConfigurationMethod(ITestNGMethod tm) {
+    return tm.isBeforeSuiteConfiguration()
+        || tm.isAfterSuiteConfiguration()
+        || tm.isBeforeTestConfiguration()
+        || tm.isAfterTestConfiguration()
+        || tm.isBeforeClassConfiguration()
+        || tm.isAfterClassConfiguration()
+        || tm.isBeforeGroupsConfiguration()
+        || tm.isAfterGroupsConfiguration()
+        || tm.isBeforeMethodConfiguration()
+        || tm.isAfterMethodConfiguration();
+  }
+
+  protected static @Nullable String calculateMethodCanonicalName(
+      Class<?> methodClass, String methodName) {
+    Set<Method> methods = ClassHelper.getAvailableMethods(methodClass); // TESTNG-139
+    return methods.stream()
+        .filter(method -> methodName.equals(method.getName()))
+        .findFirst()
+        .map(MethodHelper::calculateMethodCanonicalName)
+        .orElse(null);
+  }
+
+  public static void clear(Stream<Method> methods) {
+    methods.filter(Objects::nonNull).forEach(CANONICAL_NAME_CACHE::remove);
+  }
+
+  public static long calculateTimeOut(ITestNGMethod tm) {
+    return tm.getTimeOut() > 0 ? tm.getTimeOut() : tm.getInvocationTimeOut();
+  }
+
+  private static MatchResults matchMethod(ITestNGMethod[] methods, String regexp) {
+    MatchResults results = new MatchResults();
+    boolean usePackage = regexp.indexOf('.') != -1;
+    Pattern pattern = Pattern.compile(regexp);
+    for (ITestNGMethod method : methods) {
+      ConstructorOrMethod thisMethod = method.getConstructorOrMethod();
+      String thisMethodName = thisMethod.getName();
+      String methodName = usePackage ? calculateMethodCanonicalName(method) : thisMethodName;
+      Pair<String, String> cacheKey = Pair.create(regexp, methodName);
+      boolean match =
+          MATCH_CACHE.computeIfAbsent(cacheKey, key -> pattern.matcher(methodName).matches());
+      if (match) {
+        results.matchedMethods.add(method);
+        results.foundAtLeastAMethod = true;
+      }
+    }
+    return results;
+  }
+
+  private static class MatchResults {
+    private final List<ITestNGMethod> matchedMethods = new ArrayList<>();
+    private boolean foundAtLeastAMethod = false;
+  }
+}

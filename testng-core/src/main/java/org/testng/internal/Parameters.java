@@ -1,0 +1,1251 @@
+package org.testng.internal;
+
+import java.lang.annotation.Annotation;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.lang.reflect.Parameter;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.function.IntPredicate;
+import org.jspecify.annotations.Nullable;
+import org.testng.DataProviderHolder;
+import org.testng.IDataProviderInterceptor;
+import org.testng.IDataProviderListener;
+import org.testng.IDataProviderMethod;
+import org.testng.IParameterResolver;
+import org.testng.IRetryDataProvider;
+import org.testng.ITestClass;
+import org.testng.ITestContext;
+import org.testng.ITestNGMethod;
+import org.testng.ITestObjectFactory;
+import org.testng.ITestResult;
+import org.testng.TestNGException;
+import org.testng.annotations.AfterClass;
+import org.testng.annotations.AfterGroups;
+import org.testng.annotations.AfterMethod;
+import org.testng.annotations.AfterSuite;
+import org.testng.annotations.AfterTest;
+import org.testng.annotations.BeforeClass;
+import org.testng.annotations.BeforeGroups;
+import org.testng.annotations.BeforeMethod;
+import org.testng.annotations.BeforeSuite;
+import org.testng.annotations.BeforeTest;
+import org.testng.annotations.Factory;
+import org.testng.annotations.IDataProviderAnnotation;
+import org.testng.annotations.IFactoryAnnotation;
+import org.testng.annotations.IParametersAnnotation;
+import org.testng.annotations.ITestAnnotation;
+import org.testng.annotations.Test;
+import org.testng.internal.annotations.AnnotationHelper;
+import org.testng.internal.annotations.IAnnotationFinder;
+import org.testng.internal.annotations.IDataProvidable;
+import org.testng.internal.collections.ArrayIterator;
+import org.testng.internal.collections.CloseableIterator;
+import org.testng.internal.invokers.MethodInvocationHelper;
+import org.testng.internal.invokers.ParameterHolder;
+import org.testng.internal.invokers.ParameterHolder.ParameterOrigin;
+import org.testng.internal.objects.Dispenser;
+import org.testng.internal.objects.IObjectDispenser;
+import org.testng.internal.objects.pojo.BasicAttributes;
+import org.testng.internal.objects.pojo.CreationAttributes;
+import org.testng.internal.reflect.DataProviderMethodMatcher;
+import org.testng.internal.reflect.InjectableParameter;
+import org.testng.internal.reflect.MethodMatcher;
+import org.testng.internal.reflect.MethodMatcherContext;
+import org.testng.internal.reflect.ReflectionRecipes;
+import org.testng.internal.reflect.ResolvedParameters;
+import org.testng.util.Strings;
+import org.testng.xml.XmlSuite;
+import org.testng.xml.XmlTest;
+
+/** Methods that bind parameters declared in testng.xml to actual values used to invoke methods. */
+public class Parameters {
+
+  private static final List<Class<? extends Annotation>> annotationList =
+      Arrays.asList(
+          BeforeSuite.class,
+          AfterSuite.class,
+          BeforeTest.class,
+          AfterTest.class,
+          BeforeClass.class,
+          AfterClass.class,
+          BeforeGroups.class,
+          AfterGroups.class,
+          BeforeMethod.class,
+          AfterMethod.class,
+          Factory.class);
+
+  private static final Map<String, List<Class<?>>> mapping = new HashMap<>();
+  /*
+           +--------------+--------------+---------+--------+----------+-------------+
+           |  Annotation  | ITestContext | XmlTest | Method | Object[] | ITestResult |
+           +--------------+--------------+---------+--------+----------+-------------+
+           | BeforeSuite  | No           | No      | No     | No       | No          |
+           +--------------+--------------+---------+--------+----------+-------------+
+           | BeforeTest   | Yes          | Yes     | No     | No       | No          |
+           +--------------+--------------+---------+--------+----------+-------------+
+           | BeforeGroups | Yes          | Yes     | No     | No       | No          |
+           +--------------+--------------+---------+--------+----------+-------------+
+           | BeforeClass  | Yes          | Yes     | No     | No       | No          |
+           +--------------+--------------+---------+--------+----------+-------------+
+           | BeforeMethod | Yes          | Yes     | Yes    | Yes      | Yes         |
+           +--------------+--------------+---------+--------+----------+-------------+
+           | AfterSuite   | No           | No      | No     | No       | No          |
+           +--------------+--------------+---------+--------+----------+-------------+
+           | AfterTest    | Yes          | Yes     | No     | No       | No          |
+           +--------------+--------------+---------+--------+----------+-------------+
+           | AfterGroups  | Yes          | Yes     | No     | No       | No          |
+           +--------------+--------------+---------+--------+----------+-------------+
+           | AfterClass   | Yes          | Yes     | No     | No       | No          |
+           +--------------+--------------+---------+--------+----------+-------------+
+           | AfterMethod  | Yes          | Yes     | Yes    | Yes      | Yes         |
+           +--------------+--------------+---------+--------+----------+-------------+
+           | Test         | Yes          | Yes     | Yes    | No       | No          |
+           +--------------+--------------+---------+--------+----------+-------------+
+           | Factory      | Yes          | Yes     | No     | No       | No          |
+           +--------------+--------------+---------+--------+----------+-------------+
+
+  */
+  static {
+    List<Class<?>> ctxTest = Arrays.asList(ITestContext.class, XmlTest.class);
+    List<Class<?>> beforeAfterMethod =
+        Arrays.asList(
+            ITestContext.class, XmlTest.class, Method.class, Object[].class, ITestResult.class);
+    mapping.put(BeforeSuite.class.getSimpleName(), Collections.emptyList());
+    mapping.put(AfterSuite.class.getSimpleName(), Collections.emptyList());
+
+    mapping.put(BeforeTest.class.getSimpleName(), ctxTest);
+    mapping.put(AfterTest.class.getSimpleName(), ctxTest);
+
+    mapping.put(BeforeGroups.class.getSimpleName(), ctxTest);
+    mapping.put(AfterGroups.class.getSimpleName(), ctxTest);
+
+    mapping.put(BeforeClass.class.getSimpleName(), ctxTest);
+    mapping.put(AfterClass.class.getSimpleName(), ctxTest);
+
+    mapping.put(BeforeMethod.class.getSimpleName(), beforeAfterMethod);
+    mapping.put(AfterMethod.class.getSimpleName(), beforeAfterMethod);
+    mapping.put(
+        Test.class.getSimpleName(), Arrays.asList(ITestContext.class, XmlTest.class, Method.class));
+    mapping.put(Factory.class.getSimpleName(), ctxTest);
+  }
+
+  /** Creates the parameters needed for constructing a test class instance. */
+  public static Object[] createInstantiationParameters(
+      Constructor<?> ctor,
+      String methodAnnotation,
+      IAnnotationFinder finder,
+      String[] parameterNames,
+      Map<String, String> params,
+      XmlSuite xmlSuite) {
+
+    return createParametersForConstructor(
+        ctor,
+        ctor.getParameterTypes(),
+        finder.findOptionalValues(ctor),
+        methodAnnotation,
+        parameterNames,
+        new MethodParameters(params, Collections.emptyMap()),
+        xmlSuite);
+  }
+
+  /**
+   * Creates the parameters needed for the specified <code>@Configuration</code> <code>Method</code>
+   * .
+   *
+   * @param m the configuraton method
+   * @param currentTestMethod the current @Test method or <code>null</code> if no @Test is available
+   *     (this is not only in case the configuration method is a @Before/@AfterMethod
+   * @param finder the annotation finder
+   */
+  public static Object[] createConfigurationParameters(
+      Method m,
+      Map<String, String> params,
+      Object @Nullable [] parameterValues,
+      @Nullable ITestNGMethod currentTestMethod,
+      IAnnotationFinder finder,
+      XmlSuite xmlSuite,
+      ITestContext ctx,
+      @Nullable ITestResult testResult) {
+    Method currentTestMeth =
+        currentTestMethod != null ? currentTestMethod.getConstructorOrMethod().getMethod() : null;
+
+    Map<String, String> methodParams =
+        currentTestMethod != null
+            ? currentTestMethod.findMethodParameters(ctx.getCurrentXmlTest())
+            : Collections.emptyMap();
+
+    Class<? extends Annotation> annotation = retrieveConfigAnnotation(m);
+    String name = annotation == null ? "" : annotation.getSimpleName();
+
+    return createParameters(
+        new ConstructorOrMethod(m),
+        new MethodParameters(
+            params, methodParams, parameterValues, currentTestMeth, ctx, testResult),
+        finder,
+        xmlSuite,
+        name,
+        ResolvedParameters.none());
+  }
+
+  private static @Nullable Class<? extends Annotation> retrieveConfigAnnotation(Method m) {
+    return annotationList.stream()
+        .filter(annotation -> m.getAnnotation(annotation) != null)
+        .findAny()
+        .orElse(null);
+  }
+
+  private static Object[] createParametersForConstructor(
+      Constructor<?> constructor,
+      Class<?>[] parameterTypes,
+      String[] optionalValues,
+      String methodAnnotation,
+      String[] parameterNames,
+      MethodParameters params,
+      XmlSuite xmlSuite) {
+    if (parameterTypes.length == 0) {
+      return new Object[0];
+    }
+
+    checkParameterTypes(constructor.getName(), parameterTypes, methodAnnotation, parameterNames);
+    List<Object> vResult = new ArrayList<>();
+
+    if (canInject(methodAnnotation)) {
+      Parameter[] paramsArray = ReflectionRecipes.getConstructorParameters(constructor);
+      Object[] inject =
+          ReflectionRecipes.inject(
+              paramsArray,
+              InjectableParameter.Assistant.ALL_INJECTS,
+              new Object[0],
+              constructor,
+              params.context,
+              params.testResult);
+      if (inject != null) {
+        vResult.addAll(Arrays.asList(inject));
+      }
+    }
+    List<Object> consParams =
+        createParams(
+            constructor.getName(),
+            "constructor",
+            methodAnnotation,
+            parameterTypes,
+            optionalValues,
+            parameterNames,
+            params,
+            xmlSuite);
+    vResult.addAll(consParams);
+
+    return vResult.toArray(new Object[0]);
+  }
+
+  private static List<Object> createParams(
+      String name,
+      String prefix,
+      String methodAnnotation,
+      Class<?>[] parameterTypes,
+      String[] optionalValues,
+      String[] parameterNames,
+      MethodParameters params,
+      XmlSuite xmlSuite) {
+    List<Object> vResult = new ArrayList<>();
+    if (optionalValues.length != parameterNames.length) {
+      FilteredParameterTypes filterOutResult =
+          filterOutInjectedTypesFromOptionalValues(parameterTypes, optionalValues);
+      optionalValues = filterOutResult.getOptionalValues();
+      parameterTypes = filterOutResult.getParameterTypes();
+    }
+    if (parameterNames.length == 0 && optionalValues.length > 0) {
+      for (int i = 0; i < parameterTypes.length; i++) {
+        vResult.add(PropertyUtils.convertType(parameterTypes[i], optionalValues[i], ""));
+      }
+      return vResult;
+    }
+
+    for (int i = 0; i < parameterNames.length; i++) {
+      String p = parameterNames[i];
+      String value = System.getProperty(p, params.xmlParameters.get(p));
+      if (null == value) {
+        if (optionalValues != null) {
+          value = optionalValues[i];
+        }
+        if (null == value) {
+          throw new TestNGException(
+              "Parameter '"
+                  + p
+                  + "' is required by "
+                  + methodAnnotation
+                  + " on "
+                  + prefix
+                  + " "
+                  + name
+                  + " but has not been marked @Optional or defined\n"
+                  + (xmlSuite.getFileName() != null ? "in " + xmlSuite.getFileName() : ""));
+        }
+      }
+      vResult.add(PropertyUtils.convertType(parameterTypes[i], value, p));
+    }
+    return vResult;
+  }
+
+  /**
+   * Remove injected types from parameterTypes and optionalValues
+   *
+   * @param parameterTypes - The parameter types to be used
+   * @param optionalValues - The optional values to be considered.
+   * @return the types and optional values TestNG does not supply itself
+   */
+  static FilteredParameterTypes filterOutInjectedTypesFromOptionalValues(
+      Class<?>[] parameterTypes, String[] optionalValues) {
+    return filterOut(
+        parameterTypes, optionalValues, i -> INJECTED_TYPES.contains(parameterTypes[i]));
+  }
+
+  /**
+   * Drops the positions a predicate rejects from the parameter types and, in lockstep, from their
+   * optional values. The two arrays are positional and the annotation finder produces one optional
+   * value per parameter, so they are walked together or the pairing is lost.
+   */
+  private static FilteredParameterTypes filterOut(
+      Class<?>[] parameterTypes, String[] optionalValues, IntPredicate drop) {
+    List<Class<?>> keptTypes = new ArrayList<>(parameterTypes.length);
+    List<String> keptOptionalValues = new ArrayList<>(optionalValues.length);
+    for (int i = 0; i < parameterTypes.length; i++) {
+      if (drop.test(i)) {
+        continue;
+      }
+      keptTypes.add(parameterTypes[i]);
+      keptOptionalValues.add(optionalValues[i]);
+    }
+    return new FilteredParameterTypes(
+        keptTypes.toArray(new Class<?>[0]), keptOptionalValues.toArray(new String[0]));
+  }
+
+  /** The parameter types and optional values left once a filter has dropped some positions. */
+  static final class FilteredParameterTypes {
+    private final Class<?>[] parameterTypes;
+    private final String[] optionalValues;
+
+    private FilteredParameterTypes(Class<?>[] parameterTypes, String[] optionalValues) {
+      this.parameterTypes = parameterTypes;
+      this.optionalValues = optionalValues;
+    }
+
+    Class<?>[] getParameterTypes() {
+      return parameterTypes;
+    }
+
+    String[] getOptionalValues() {
+      return optionalValues;
+    }
+  }
+
+  private static boolean areAllOptionalValuesNull(String[] optionalValues) {
+    if (optionalValues == null || optionalValues.length == 0) {
+      return true;
+    }
+    boolean isNull = true;
+    for (String optionalValue : optionalValues) {
+      if (optionalValue != null) {
+        isNull = false;
+        break;
+      }
+    }
+    return isNull;
+  }
+
+  /**
+   * @return An array of parameters suitable to invoke this method, possibly picked from the
+   *     property file
+   */
+  private static Object[] createParametersForMethod(
+      ConstructorOrMethod method,
+      Class<?>[] parameterTypes,
+      String[] optionalValues,
+      String methodAnnotation,
+      String[] parameterNames,
+      MethodParameters params,
+      XmlSuite xmlSuite,
+      ResolvedParameters resolved) {
+    if (parameterTypes.length == 0) {
+      return new Object[0];
+    }
+
+    // A parameter a resolver owns is neither TestNG's to inject nor testng.xml's to supply, so it
+    // is taken out before both checks below: the native injection check would reject it, and the
+    // value lookup would produce a value for it that nothing consumes.
+    FilteredParameterTypes unresolved =
+        filterOutResolvedParameters(method, parameterTypes, optionalValues, resolved);
+
+    // Gate on the same set that is checked: an @Optional carried by a parameter the resolver owns
+    // says nothing about the parameters it does not own, and reading the unfiltered values here
+    // would skip the check for them entirely. With no resolver in play this is the same array.
+    if (areAllOptionalValuesNull(unresolved.getOptionalValues())) {
+      checkParameterTypes(
+          method.getName(), unresolved.getParameterTypes(), methodAnnotation, parameterNames);
+    }
+    List<Object> vResult = new ArrayList<>();
+
+    List<Object> consParams =
+        createParams(
+            method.getName(),
+            "method",
+            methodAnnotation,
+            unresolved.getParameterTypes(),
+            unresolved.getOptionalValues(),
+            parameterNames,
+            params,
+            xmlSuite);
+    if (canInject(methodAnnotation)) {
+      Parameter[] paramsArray = extractParameters(method);
+      Object[] inject =
+          ReflectionRecipes.inject(
+              paramsArray,
+              InjectableParameter.Assistant.ALL_INJECTS,
+              consParams.toArray(new Object[0]),
+              params.currentTestMethod,
+              params.context,
+              params.testResult);
+      if (inject != null) {
+        vResult.addAll(Arrays.asList(inject));
+      }
+    } else {
+      vResult.addAll(consParams);
+    }
+    return vResult.toArray(new Object[0]);
+  }
+
+  /**
+   * The parameter types, and their optional values, that TestNG still has to account for itself. A
+   * parameter an {@link IParameterResolver} owns is supplied by that resolver, so it is neither
+   * checked against the native injection rules -- which is what lets a test method declare one
+   * without a data provider -- nor looked up in testng.xml. With no resolver in play both arrays
+   * are handed back untouched, and the method is not reflected on a second time.
+   */
+  private static FilteredParameterTypes filterOutResolvedParameters(
+      ConstructorOrMethod method,
+      Class<?>[] parameterTypes,
+      String[] optionalValues,
+      ResolvedParameters resolved) {
+    if (resolved.isEmpty()) {
+      return new FilteredParameterTypes(parameterTypes, optionalValues);
+    }
+    Parameter[] parameters = extractParameters(method);
+    return filterOut(parameterTypes, optionalValues, i -> resolved.owns(parameters[i]));
+  }
+
+  private static Parameter[] extractParameters(ConstructorOrMethod method) {
+    if (method.getMethod() != null) {
+      return ReflectionRecipes.getMethodParameters(method.getMethod());
+    }
+    return ReflectionRecipes.getConstructorParameters(method.requireConstructor());
+  }
+
+  /** How {@code handleParameters} and its callers spell the {@code @Test} annotation. */
+  public static final String TEST_ANNOTATION = "@" + Test.class.getSimpleName();
+
+  private static boolean canInject(String annotation) {
+    return !TEST_ANNOTATION.equalsIgnoreCase(annotation);
+  }
+
+  private static final List<Class<?>> INJECTED_TYPES =
+      Arrays.asList(
+          ITestContext.class, ITestResult.class, XmlTest.class, Method.class, Object[].class);
+
+  private static void checkParameterTypes(
+      String methodName,
+      Class<?>[] parameterTypes,
+      String methodAnnotation,
+      String[] parameterNames) {
+    int totalLength = parameterTypes.length;
+    for (Class<?> parameterType : parameterTypes) {
+      if (INJECTED_TYPES.contains(parameterType)) {
+        totalLength--;
+      }
+    }
+    if (parameterNames.length == 0) {
+      // parameterNames is usually populated via the @Parameters annotation, so we would need to
+      // apply our logic only when @Parameters annotation is not involved.
+      boolean invalid = (totalLength != 0) || !validParameters(methodAnnotation, parameterTypes);
+      if (invalid) {
+        String annotation = methodAnnotation;
+        if (!methodAnnotation.startsWith("@")) {
+          annotation = "@" + methodAnnotation;
+        }
+        String errPrefix;
+        if (mapping.containsKey(methodAnnotation)) {
+          boolean nativeInjectionUnsupported = mapping.get(methodAnnotation).isEmpty();
+          if (nativeInjectionUnsupported) {
+            errPrefix =
+                "Native Injection is NOT supported for @"
+                    + methodAnnotation
+                    + " annotated "
+                    + methodName;
+          } else {
+            errPrefix =
+                "Can inject only one of "
+                    + prettyFormat(mapping.get(methodAnnotation))
+                    + " into a "
+                    + annotation
+                    + " annotated "
+                    + methodName;
+          }
+        } else {
+          errPrefix =
+              "Cannot inject "
+                  + annotation
+                  + " annotated Method ["
+                  + methodName
+                  + "] with "
+                  + Arrays.toString(parameterTypes);
+        }
+        throw new TestNGException(
+            errPrefix
+                + ".\nFor more information on native dependency injection please refer to "
+                + "https://testng.org/#_dependency_injection");
+      }
+    }
+
+    if (parameterNames.length != totalLength) {
+      throw new TestNGException(
+          "Method "
+              + methodName
+              + " requires "
+              + parameterTypes.length
+              + " parameters but "
+              + parameterNames.length
+              + " were supplied in the "
+              + methodAnnotation
+              + " annotation.");
+    }
+  }
+
+  private static boolean validParameters(String methodAnnotation, Class<?>[] parameterTypes) {
+    List<Class<?>> localMapping = mapping.get(methodAnnotation.replace("@", ""));
+    if (localMapping == null) {
+      return false;
+    }
+    for (Class<?> parameterType : parameterTypes) {
+      if (!localMapping.contains(parameterType)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static String prettyFormat(List<Class<?>> classes) {
+    StringBuilder builder = new StringBuilder("<");
+    if (classes.size() == 1) {
+      builder.append(classes.get(0));
+    } else {
+      int length = classes.size();
+      for (int i = 0; i < length - 1; i++) {
+        builder.append(classes.get(i).getSimpleName()).append(", ");
+      }
+      builder.append(classes.get(length - 1).getSimpleName());
+    }
+    builder.append(">");
+    return builder.toString();
+  }
+
+  private static @Nullable IDataProviderMethod findDataProvider(
+      ITestObjectFactory objectFactory,
+      @Nullable Object instance,
+      ITestClass clazz,
+      ConstructorOrMethod m,
+      IAnnotationFinder finder,
+      @Nullable ITestContext context) {
+    IDataProviderMethod result = null;
+
+    IDataProvidable dp = findDataProviderInfo(clazz, m, finder);
+    if (dp != null) {
+      String dataProviderName = dp.getDataProvider();
+      Class<?> dataProviderClass = dp.getDataProviderClass();
+      boolean isDynamicDataProvider =
+          dataProviderClass == null && !dp.getDataProviderDynamicClass().isEmpty();
+      if (isDynamicDataProvider) {
+        try {
+          dataProviderClass = new DataProviderLoader().loadClazz(dp.getDataProviderDynamicClass());
+        } catch (ClassNotFoundException e) {
+          throw new TestNGException("Dynamic data provider class %s not found", e);
+        }
+      }
+
+      if (!Utils.isStringEmpty(dataProviderName)) {
+        result =
+            findDataProvider(
+                objectFactory,
+                instance,
+                clazz,
+                finder,
+                dataProviderName,
+                dataProviderClass,
+                isDynamicDataProvider,
+                context);
+
+        if (null == result) {
+          throw new TestNGException(
+              "Method "
+                  + m
+                  + " requires a @DataProvider named : "
+                  + dataProviderName
+                  + (dataProviderClass != null ? " in class " + dataProviderClass.getName() : ""));
+        }
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Find the data provider info (data provider name and class) on either @Test(dataProvider),
+   * <code>@Factory(dataProvider)</code> on a method or @Factory(dataProvider) on a constructor.
+   */
+  private static @Nullable IDataProvidable findDataProviderInfo(
+      ITestClass clazz, ConstructorOrMethod m, IAnnotationFinder finder) {
+    if (m.getMethod() == null) {
+      // @Factory(dataProvider) on a constructor
+      return AnnotationHelper.findFactory(finder, m.requireConstructor());
+    }
+
+    // @Test(dataProvider) on a method
+    ITestAnnotation result = AnnotationHelper.findTest(finder, m.getMethod());
+    if (result != null) {
+      // We may have a class level @Test annotation on which there might have been a data provider
+      // defined
+      // @Test(dataProvider) on a class
+      ITestAnnotation classLevel = AnnotationHelper.findTest(finder, clazz.getRealClass());
+      if (classLevel == null) {
+        return result;
+      }
+      return merge(result, classLevel);
+    }
+    // @Factory(dataProvider) on a method
+    IFactoryAnnotation factory = AnnotationHelper.findFactory(finder, m.getMethod());
+    if (factory != null) {
+      return factory;
+    }
+    // @Test(dataProvider) on a class
+    return AnnotationHelper.findTest(finder, clazz.getRealClass());
+  }
+
+  private static IDataProvidable merge(ITestAnnotation methodLevel, ITestAnnotation classLevel) {
+    // If no data provider information was provided at class level, then exit
+    if (isDataProviderClassEmpty(classLevel) && isDataProviderNameEmpty(classLevel)) {
+      return methodLevel;
+    }
+
+    String dataProvider =
+        Strings.isNullOrEmpty(methodLevel.getDataProvider())
+                && Strings.isNotNullAndNotEmpty(classLevel.getDataProvider())
+            ? classLevel.getDataProvider()
+            : methodLevel.getDataProvider();
+
+    Class<?> dataProviderClass =
+        isDataProviderClassEmpty(methodLevel) && !isDataProviderClassEmpty(classLevel)
+            ? classLevel.getDataProviderClass()
+            : methodLevel.getDataProviderClass();
+
+    String dataProviderDynamicClass =
+        isDynamicDataProviderClassEmpty(methodLevel) && !isDynamicDataProviderClassEmpty(classLevel)
+            ? classLevel.getDataProviderDynamicClass()
+            : methodLevel.getDataProviderDynamicClass();
+
+    return new ImmutableDataProvidable(dataProvider, dataProviderClass, dataProviderDynamicClass);
+  }
+
+  private static boolean isDataProviderClassEmpty(ITestAnnotation annotation) {
+    return annotation.getDataProviderClass() == null
+        || Object.class.equals(annotation.getDataProviderClass());
+  }
+
+  private static boolean isDynamicDataProviderClassEmpty(ITestAnnotation annotation) {
+    return annotation.getDataProviderDynamicClass().isEmpty();
+  }
+
+  private static boolean isDataProviderNameEmpty(ITestAnnotation annotation) {
+    return Strings.isNullOrEmpty(annotation.getDataProvider());
+  }
+
+  /** Find a method that has a @DataProvider(name=name) */
+  private static @Nullable IDataProviderMethod findDataProvider(
+      ITestObjectFactory objectFactory,
+      @Nullable Object instance,
+      ITestClass clazz,
+      IAnnotationFinder finder,
+      String name,
+      @Nullable Class<?> dataProviderClass,
+      boolean isDynamicDataProvider,
+      @Nullable ITestContext context) {
+    IDataProviderMethod result = null;
+
+    Class<?> cls = clazz.getRealClass();
+    boolean shouldBeStatic = false;
+    boolean isDataProviderClassAbstract = Modifier.isAbstract(cls.getModifiers());
+    if (dataProviderClass != null && !isDataProviderClassAbstract) {
+      cls = dataProviderClass;
+      shouldBeStatic = true;
+    }
+
+    for (Method m : ClassHelper.getAvailableMethods(cls)) {
+      IDataProviderAnnotation dp = finder.findAnnotation(m, IDataProviderAnnotation.class);
+      if (dp == null || !name.equals(getDataProviderName(dp, m))) {
+        continue;
+      }
+      Object instanceToUse = instance;
+      if (shouldBeStatic && (m.getModifiers() & Modifier.STATIC) == 0) {
+        IObjectDispenser dispenser = Dispenser.newInstance(objectFactory);
+        BasicAttributes basic = new BasicAttributes(clazz, dataProviderClass);
+        CreationAttributes attributes = new CreationAttributes(context, basic, null);
+        instanceToUse = dispenser.dispense(attributes);
+      }
+      // Not a static method but no instance exists, then create new one if possible
+      if ((m.getModifiers() & Modifier.STATIC) == 0 && instanceToUse == null) {
+        try {
+          instanceToUse = objectFactory.newInstance(cls);
+        } catch (TestNGException ignored) {
+        }
+      }
+
+      if (result != null) {
+        throw new TestNGException("Found two providers called '" + name + "' on " + cls);
+      }
+
+      if (isDynamicDataProvider) {
+        result = new DataProviderMethodRemovable(instanceToUse, m, dp);
+      } else {
+        result = new DataProviderMethod(instanceToUse, m, dp);
+      }
+    }
+
+    return result;
+  }
+
+  private static String getDataProviderName(IDataProviderAnnotation dp, Method m) {
+    return Strings.isNullOrEmpty(dp.getName()) ? m.getName() : dp.getName();
+  }
+
+  private static String[] extractOptionalValues(
+      IAnnotationFinder finder, ConstructorOrMethod consMethod) {
+    if (consMethod.getMethod() != null) {
+      return finder.findOptionalValues(consMethod.getMethod());
+    }
+    return finder.findOptionalValues(consMethod.requireConstructor());
+  }
+
+  private static Object[] createParameters(
+      ConstructorOrMethod m,
+      MethodParameters params,
+      IAnnotationFinder finder,
+      XmlSuite xmlSuite,
+      String atName,
+      ResolvedParameters resolved) {
+    List<Object> result = new ArrayList<>();
+    String[] extraOptionalValues = extractOptionalValues(finder, m);
+
+    Object[] extraParameters;
+    //
+    // Try to find an @Parameters annotation
+    //
+    IParametersAnnotation annotation = finder.findAnnotation(m, IParametersAnnotation.class);
+    Class<?>[] types = m.getParameterTypes();
+    if (null != annotation) {
+      String[] parameterNames = annotation.getValue();
+      extraParameters =
+          createParametersForMethod(
+              m, types, extraOptionalValues, atName, parameterNames, params, xmlSuite, resolved);
+    }
+
+    //
+    // Else, use the deprecated syntax
+    //
+    else {
+      extraParameters =
+          createParametersForMethod(
+              m, types, extraOptionalValues, atName, new String[0], params, xmlSuite, resolved);
+    }
+
+    //
+    // Add the extra parameters we found
+    //
+    Collections.addAll(result, extraParameters);
+
+    // If the method declared an Object[] parameter and we have parameter values, inject them. The
+    // slot is counted among the parameters that reached this point: a parameter a resolver owns
+    // is not in the list, so its position must not be either.
+    Parameter[] declared = resolved.isEmpty() ? null : extractParameters(m);
+    int slot = 0;
+    for (int i = 0; i < types.length; i++) {
+      if (declared != null && resolved.owns(declared[i])) {
+        continue;
+      }
+      if (Object[].class.equals(types[i])) {
+        result.add(slot, params.parameterValues);
+      }
+      slot++;
+    }
+
+    return result.toArray(new Object[0]);
+  }
+
+  /**
+   * If the method has parameters, fill them in. Either by using a @DataProvider if any was
+   * provided, or by looking up <code>&lt;parameters&gt;</code> in testng.xml
+   *
+   * @return An Iterator over the values for each parameter of this method.
+   */
+  public static ParameterHolder handleParameters(
+      ITestObjectFactory objectFactory,
+      ITestNGMethod testMethod,
+      Map<String, String> allParameterNames,
+      @Nullable Object instance,
+      MethodParameters methodParams,
+      XmlSuite xmlSuite,
+      IAnnotationFinder annotationFinder,
+      @Nullable Object fedInstance,
+      DataProviderHolder holder) {
+    return handleParameters(
+        objectFactory,
+        testMethod,
+        allParameterNames,
+        instance,
+        methodParams,
+        xmlSuite,
+        annotationFinder,
+        fedInstance,
+        holder,
+        TEST_ANNOTATION);
+  }
+
+  /**
+   * If the method has parameters, fill them in. Either by using a @DataProvider if any was
+   * provided, or by looking up <code>&lt;parameters&gt;</code> in testng.xml
+   *
+   * @return An Iterator over the values for each parameter of this method.
+   */
+  public static ParameterHolder handleParameters(
+      ITestObjectFactory objectFactory,
+      ITestNGMethod testMethod,
+      Map<String, String> allParameterNames,
+      @Nullable Object instance,
+      MethodParameters methodParams,
+      XmlSuite xmlSuite,
+      IAnnotationFinder annotationFinder,
+      @Nullable Object fedInstance,
+      DataProviderHolder holder,
+      String annotationName) {
+    return handleParameters(
+        objectFactory,
+        testMethod,
+        allParameterNames,
+        instance,
+        methodParams,
+        xmlSuite,
+        annotationFinder,
+        fedInstance,
+        holder,
+        annotationName,
+        Collections.emptyList());
+  }
+
+  /**
+   * The same, for a run that registers {@link IParameterResolver}s. A resolver owns some of the
+   * parameters of a {@code @Test} method, so those must not be counted against the native injection
+   * rules -- nor, later, against the data provider row.
+   *
+   * @param parameterResolvers the resolvers registered for the suite the method belongs to.
+   * @return An Iterator over the values for each parameter of this method.
+   */
+  public static ParameterHolder handleParameters(
+      ITestObjectFactory objectFactory,
+      ITestNGMethod testMethod,
+      Map<String, String> allParameterNames,
+      @Nullable Object instance,
+      MethodParameters methodParams,
+      XmlSuite xmlSuite,
+      IAnnotationFinder annotationFinder,
+      @Nullable Object fedInstance,
+      DataProviderHolder holder,
+      String annotationName,
+      Collection<IParameterResolver> parameterResolvers) {
+    /*
+     * Do we have a @DataProvider? If yes, then we have several
+     * sets of parameters for this method
+     */
+    final IDataProviderMethod dataProviderMethod =
+        findDataProvider(
+            objectFactory,
+            instance,
+            Utils.requireTestClassOf(testMethod),
+            testMethod.getConstructorOrMethod(),
+            annotationFinder,
+            methodParams.context);
+    ParameterOrigin origin;
+
+    if (null != dataProviderMethod) {
+      if (testMethod instanceof TestNGMethod) {
+        ((TestNGMethod) testMethod).setDataProviderMethod(dataProviderMethod);
+      }
+      int parameterCount = testMethod.getConstructorOrMethod().getParameterTypes().length;
+
+      for (int i = 0; i < parameterCount; i++) {
+        String n = "param" + i;
+        allParameterNames.put(n, n);
+      }
+      Class<?> retryClass = dataProviderMethod.retryUsing();
+      boolean shouldRetry;
+      IRetryDataProvider retry = null;
+      if (!retryClass.equals(IRetryDataProvider.DisableDataProviderRetries.class)) {
+        IObjectDispenser dispenser = Dispenser.newInstance(objectFactory);
+        BasicAttributes basic = new BasicAttributes(testMethod.getTestClass(), retryClass);
+        CreationAttributes attributes = new CreationAttributes(methodParams.context, basic, null);
+        retry =
+            (IRetryDataProvider)
+                Objects.requireNonNull(
+                    dispenser.dispense(attributes),
+                    "could not instantiate the data provider retry analyzer");
+      }
+
+      CloseableIterator<Object @Nullable []> initParams = null;
+      RuntimeException thrownException;
+      do {
+
+        for (IDataProviderListener dataProviderListener : holder.getListeners()) {
+          dataProviderListener.beforeDataProviderExecution(
+              dataProviderMethod, testMethod, methodParams.context);
+        }
+
+        try {
+          initParams =
+              MethodInvocationHelper.invokeDataProvider(
+                  dataProviderMethod
+                      .getInstance(), /* a test instance or null if the data provider is static*/
+                  Objects.requireNonNull(
+                      dataProviderMethod.getMethod(),
+                      "the data provider still holds its method while it yields rows"),
+                  testMethod,
+                  Objects.requireNonNull(
+                      methodParams.context,
+                      "a data provider is invoked from inside a test context"),
+                  fedInstance,
+                  annotationFinder);
+          shouldRetry = false;
+          thrownException = null;
+        } catch (RuntimeException e) {
+          for (IDataProviderListener each : holder.getListeners()) {
+            each.onDataProviderFailure(testMethod, methodParams.context, e);
+          }
+          if (retry != null) {
+            shouldRetry = retry.retry(dataProviderMethod);
+            thrownException = e;
+          } else {
+            throw e;
+          }
+        }
+      } while (shouldRetry);
+
+      if (thrownException != null) {
+        // The only time when this will be true is when the following happens:
+        // 1. A Retry was involved with the data provider
+        // 2. The retry mechanism immediately returned false and thus causing
+        // a retry to not happen
+        // 3. Since a retry was not recommended the while loop would have exited but
+        // we still should have been failing the test since the data provider invocation
+        // failed.
+        throw thrownException;
+      }
+
+      // Preserve a handle on the original closeable source before it is wrapped by
+      // FilteredParameters and any interceptors, so the resource can be released later - including
+      // if the setup below (listeners / filtering / interceptors) throws before a ParameterHolder
+      // takes ownership of it.
+      CloseableIterator<Object @Nullable []> closeableSource =
+          Objects.requireNonNull(initParams, "the data provider produced no iterator");
+      try {
+        for (IDataProviderListener dataProviderListener : holder.getListeners()) {
+          dataProviderListener.afterDataProviderExecution(
+              dataProviderMethod, testMethod, methodParams.context);
+        }
+
+        // If the data provider is restricting the indices to return, filter them out
+        final List<Integer> allIndices = new ArrayList<>();
+        allIndices.addAll(testMethod.getInvocationNumbers());
+        allIndices.addAll(dataProviderMethod.getIndices());
+
+        Iterator<Object @Nullable []> filteredParameters =
+            new FilteredParameters(
+                closeableSource, testMethod, dataProviderMethod.getName(), allIndices);
+
+        testMethod.setMoreInvocationChecker(filteredParameters::hasNext);
+        for (IDataProviderInterceptor interceptor : holder.getInterceptors()) {
+          filteredParameters =
+              interceptor.intercept(
+                  filteredParameters, dataProviderMethod, testMethod, methodParams.context);
+        }
+
+        if (dataProviderMethod instanceof DataProviderMethodRemovable) {
+          ((DataProviderMethodRemovable) dataProviderMethod).setMethod(null);
+          ((DataProviderMethodRemovable) dataProviderMethod).setInstance(null);
+          if (testMethod instanceof TestNGMethod) {
+            ((TestNGMethod) testMethod).setDataProviderMethod(null);
+          }
+        }
+
+        return new ParameterHolder(
+            filteredParameters,
+            ParameterOrigin.ORIGIN_DATA_PROVIDER,
+            dataProviderMethod,
+            closeableSource);
+      } catch (RuntimeException | Error e) {
+        // Setup failed before the ParameterHolder could take ownership of the source, so no one
+        // else will close it; release it here so a Stream-backed data provider does not leak.
+        closeableSource.close();
+        throw e;
+      }
+    } else if (methodParams.xmlParameters.isEmpty()) {
+      origin = ParameterOrigin.NATIVE;
+    } else {
+      origin = ParameterOrigin.ORIGIN_XML;
+    }
+    //
+    // Normal case: we have only one set of parameters coming from testng.xml
+    //
+    allParameterNames.putAll(methodParams.xmlParameters);
+    // Create an Object[][] containing just one row of parameters
+    Object[][] allParameterValuesArray = new Object[1][];
+    allParameterValuesArray[0] =
+        createParameters(
+            testMethod.getConstructorOrMethod(),
+            methodParams,
+            annotationFinder,
+            xmlSuite,
+            annotationName,
+            resolvedParameters(
+                testMethod, methodParams.context, annotationName, parameterResolvers));
+
+    // Mark that this method needs to have at least a certain
+    // number of invocations (needed later to call AfterGroups
+    // at the right time).
+    testMethod.setParameterInvocationCount(allParameterValuesArray.length);
+    // Turn it into an Iterable
+    Iterator<Object @Nullable []> parameters = new ArrayIterator(allParameterValuesArray);
+
+    return new ParameterHolder(parameters, origin, null);
+  }
+
+  /**
+   * Gets an array of parameter values returned by data provider or the ones that are injected based
+   * on parameter type. The method also checks for {@code NoInjection} annotation
+   *
+   * @param parameterValues parameter values from a data provider
+   * @param method method to be invoked
+   * @param context test context
+   * @deprecated since 7.13.0. This form knows nothing of the {@link IParameterResolver}s a run
+   *     registers, so a parameter one of them owns is counted against the data provider row and the
+   *     method fails on arity. Use {@link #injectParameters(Object[], ITestNGMethod, ITestContext,
+   *     Collection)}, which TestNG itself calls.
+   */
+  @Deprecated
+  public static Object[] injectParameters(
+      Object[] parameterValues, Method method, ITestContext context) throws TestNGException {
+    MethodMatcherContext matcherContext =
+        new MethodMatcherContext(method, parameterValues, context, null);
+    final MethodMatcher matcher = new DataProviderMethodMatcher(matcherContext);
+    return matcher.getConformingArguments();
+  }
+
+  /**
+   * The arguments an invocation that will only be reported would have had: a resolver-owned
+   * position holds {@code null} and no resolver runs, since nothing consumes what it would create.
+   *
+   * @param parameterValues parameter values from a data provider, empty when there is none
+   * @param testMethod the test method that is reported
+   * @param context test context
+   * @param parameterResolvers the resolvers registered for the suite the method belongs to
+   */
+  public static Object[] parametersForReporting(
+      Object[] parameterValues,
+      ITestNGMethod testMethod,
+      ITestContext context,
+      Collection<IParameterResolver> parameterResolvers)
+      throws TestNGException {
+    Method method = testMethod.getConstructorOrMethod().requireMethod();
+    ResolvedParameters placeholders =
+        ResolvedParameters.placeholders(
+            ReflectionRecipes.getMethodParameters(method), testMethod, context, parameterResolvers);
+    MethodMatcherContext matcherContext =
+        new MethodMatcherContext(method, parameterValues, context, null, placeholders);
+    return new DataProviderMethodMatcher(matcherContext).getConformingArguments();
+  }
+
+  /**
+   * The same, for a run that registers {@link IParameterResolver}s: a parameter a resolver owns is
+   * left out of the matching and its value is placed back at its declared position.
+   *
+   * @param parameterValues parameter values from a data provider, empty when there is none
+   * @param testMethod the test method to be invoked
+   * @param context test context
+   * @param parameterResolvers the resolvers registered for the suite the method belongs to
+   */
+  public static Object[] injectParameters(
+      Object[] parameterValues,
+      ITestNGMethod testMethod,
+      ITestContext context,
+      Collection<IParameterResolver> parameterResolvers)
+      throws TestNGException {
+    Method method = testMethod.getConstructorOrMethod().requireMethod();
+    ResolvedParameters resolved =
+        ResolvedParameters.of(
+            ReflectionRecipes.getMethodParameters(method), testMethod, context, parameterResolvers);
+    MethodMatcherContext matcherContext =
+        new MethodMatcherContext(method, parameterValues, context, null, resolved);
+    final MethodMatcher matcher = new DataProviderMethodMatcher(matcherContext);
+    return matcher.getConformingArguments();
+  }
+
+  /**
+   * Resolves the resolver-owned positions of an already built argument array again, for a retry
+   * that reuses its row. {@link IParameterResolver#resolveParameter} is promised once per
+   * invocation, and a retry is an invocation of its own; the values TestNG itself injected, and the
+   * ones the data provider supplied, are kept as they are.
+   *
+   * @param parameterValues the arguments the previous attempt ran with, one per parameter
+   * @return the same array when nothing is resolver-owned, otherwise a copy with those positions
+   *     resolved afresh
+   */
+  public static Object[] resolveAgain(
+      Object[] parameterValues,
+      ITestNGMethod testMethod,
+      ITestContext context,
+      Collection<IParameterResolver> parameterResolvers) {
+    Method method = testMethod.getConstructorOrMethod().requireMethod();
+    Parameter[] parameters = ReflectionRecipes.getMethodParameters(method);
+    ResolvedParameters resolved =
+        ResolvedParameters.of(parameters, testMethod, context, parameterResolvers);
+    if (resolved.isEmpty()) {
+      return parameterValues;
+    }
+    // Built as a list, the way native injection builds its own array: a row's elements are typed
+    // non-null
+    // while a provider, and a resolver, routinely supply null ones.
+    List<Object> refreshed = new ArrayList<>(Arrays.asList(parameterValues));
+    for (int i = 0; i < parameters.length; i++) {
+      if (resolved.owns(parameters[i])) {
+        refreshed.set(i, resolved.resolve(parameters[i]));
+      }
+    }
+    return refreshed.toArray(new Object[0]);
+  }
+
+  /**
+   * The parameters a resolver owns on a {@code @Test} method. Configuration methods and
+   * constructors are deliberately left out of this first implementation, and a method TestNG could
+   * not reflect on has nothing to resolve.
+   */
+  private static ResolvedParameters resolvedParameters(
+      ITestNGMethod testMethod,
+      @Nullable ITestContext context,
+      String annotationName,
+      Collection<IParameterResolver> parameterResolvers) {
+    Method method = testMethod.getConstructorOrMethod().getMethod();
+    if (context == null || method == null || canInject(annotationName)) {
+      return ResolvedParameters.none();
+    }
+    return ResolvedParameters.of(
+        ReflectionRecipes.getMethodParameters(method), testMethod, context, parameterResolvers);
+  }
+
+  /** A parameter passing helper class. */
+  public static class MethodParameters {
+    private final Map<String, String> xmlParameters;
+    private final @Nullable Method currentTestMethod;
+    private final @Nullable ITestContext context;
+    private final Object @Nullable [] parameterValues;
+    private final @Nullable ITestResult testResult;
+
+    public MethodParameters(Map<String, String> params, Map<String, String> methodParams) {
+      this(params, methodParams, null, null, null, null);
+    }
+
+    public static MethodParameters newInstance(
+        Map<String, String> params, ITestNGMethod testNGMethod, ITestContext context) {
+      Map<String, String> methodParams =
+          testNGMethod.findMethodParameters(context.getCurrentXmlTest());
+      Method method = testNGMethod.getConstructorOrMethod().getMethod();
+      return new MethodParameters(params, methodParams, null, method, context, null);
+    }
+
+    /**
+     * @param params parameters found in the suite and test tags
+     * @param methodParams parameters found in the include tag
+     * @param pv parameter values to be used.
+     * @param m the {@link Method} object.
+     * @param ctx The {@link ITestContext} object representing the current test
+     * @param tr - The {@link ITestResult} object.
+     */
+    public MethodParameters(
+        Map<String, String> params,
+        Map<String, String> methodParams,
+        Object @Nullable [] pv,
+        @Nullable Method m,
+        @Nullable ITestContext ctx,
+        @Nullable ITestResult tr) {
+      Map<String, String> allParams = new HashMap<>();
+      allParams.putAll(params);
+      allParams.putAll(methodParams);
+      xmlParameters = allParams;
+      currentTestMethod = m;
+      context = ctx;
+      parameterValues = pv;
+      testResult = tr;
+    }
+  }
+
+  private static final class ImmutableDataProvidable implements IDataProvidable {
+    private final String dataProvider;
+    private final @Nullable Class<?> dataProviderClass;
+    private final String dataProviderDynamicClass;
+
+    private ImmutableDataProvidable(
+        String dataProvider,
+        @Nullable Class<?> dataProviderClass,
+        String dataProviderDynamicClass) {
+      this.dataProvider = dataProvider;
+      this.dataProviderClass = dataProviderClass;
+      this.dataProviderDynamicClass =
+          dataProviderDynamicClass != null ? dataProviderDynamicClass : "";
+    }
+
+    @Override
+    public String getDataProvider() {
+      return dataProvider;
+    }
+
+    @Override
+    public void setDataProvider(String v) {}
+
+    @Override
+    public @Nullable Class<?> getDataProviderClass() {
+      return dataProviderClass;
+    }
+
+    @Override
+    public void setDataProviderClass(@Nullable Class<?> v) {}
+
+    @Override
+    public String getDataProviderDynamicClass() {
+      return dataProviderDynamicClass;
+    }
+
+    @Override
+    public void setDataProviderDynamicClass(String v) {}
+  }
+}
